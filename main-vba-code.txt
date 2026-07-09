@@ -1,0 +1,2064 @@
+Option Explicit
+'=============================================================
+' نظام نقل المدرسين - النسخة الموحَّدة النهائية (1-7-2026)
+'
+' ترتيب تنفيذ العمليات :
+'   الخطوة 1: النقل الجغرافي + الفائض والشاغر   - للعقود جغرافياً، للجميع فائض/شاغر
+'   الخطوة 2: تجديد التكليف                   - تثبيت المكلفين الراغبين في مدارس تكليفهم
+'   الخطوة 3: النقل بالتبادل                   - لا يؤثر على أعداد الكادر، يُنفَّذ أخيراً
+'   الخطوة 4: تحديث الحالة        - (نقل / تكليف / تغيير جهة / انهاء / او "يرد الطلب") بعد اكتمال كل النقلات
+'   الخطوة 5: تقييم ما بعد النقل               - تحليل النتائج وكتابة التوصية في العمود 19
+'   الخطوة 6: تعبئة بيانات الحصص والكادر       - ملء الأعمدة 21-30 لتسهيل التدقيق اليدوي
+'
+' قاعدة النقل الجغرافي للعقود (الخطوة 1):
+'   يُوافق على النقل إذا تحقق الشرطان معاً:
+'   الشرط 1 - مدرسته الحالية في مجموعة مختلفة عن منطقة سكنه
+'   الشرط 2 - المدرسة المطلوبة في نفس مجموعة منطقة سكنه
+'   السبب: يتم الموافقة على نقل العقود حسب قاعدة السكن
+'
+' قاعدة النقل بالتبادل (الخطوة 3) - الشروط الإضافية:
+'   يُشترط تطابق التحصيل الدراسي بين المدرسَين
+'   يُشترط تطابق نوع التوظيف (ملاك مع ملاك، عقد مع عقد)
+'
+' هيكل أعمدة المادة في جدول المدارس (6 أعمدة لكل مادة):
+'   subjCol     = اسم المادة (عدد الحصص)
+'   subjCol + 1 = الكادر
+'   subjCol + 2 = الفائض
+'   subjCol + 3 = الشاغر
+'   subjCol + 4 = داخل  (عدد من انتقلوا إلى هذه المدرسة)
+'   subjCol + 5 = خارج  (عدد من انتقلوا من هذه المدرسة)
+'
+' قاعدة خدمة الأرياف (تحدد الحالة في العمود 17 فقط، لا تمنع النقل):
+'   عقد    = نقل
+'   ملاك + أكمل الأرياف (نعم) دائما ينقل   = نقل
+'   ملاك + لم يكمل (كلا) + اذا طلب مدرسة ريف   = نقل
+'   ملاك + لم يكمل (كلا) + وطلب مدرسة حضر   = تكليف
+'   ملاك + لم يكمل خدمة الارياف وطلب مدرسة حضر وهو اساسا مكلف  = تغيير جهة تكليف
+'   ملاك وعاد الى مدرسته الاصلية  = انهاء  تكليف
+'
+'=============================================================
+
+
+'=============================================================
+' القيم النصية الثابتة
+' مركزية هنا لتسهيل أي تعديل مستقبلي في مكان واحد فقط
+'=============================================================
+Private Const VAL_EVENING           As String = "مسائي"
+Private Const VAL_URBAN             As String = "حضر"
+Private Const VAL_RURAL_DONE        As String = "نعم"
+Private Const VAL_CONTRACT          As String = "عقد"
+Private Const VAL_PERMANENT         As String = "ملاك"
+Private Const VAL_TRANSFERRED       As String = "نقل"
+Private Const VAL_SECONDMENT        As String = "تكليف"
+Private Const VAL_SECONDMENT_CHANGE As String = "تغيير جهة تكليف"
+Private Const VAL_SECONDMENT_ENDED  As String = "انهاء تكليف"
+Private Const VAL_RENEWAL           As String = "تجديد تكليف"
+Private Const VAL_STABILIZE         As String = "تثبيت تكليف"
+Private Const VAL_REJECTED          As String = "يرد الطلب"
+Private Const VAL_ITS_CRITICAL      As String = "نعم"   ' قيمة المدرسة الحرجة/الطاردة
+
+' قيم الجنس الثابتة — موحَّدة هنا لتجنب أخطاء الإملاء في المقارنات
+' تنبيه مهم: VAL_FEMALE = "انثى" بدون همزة
+' يجب التأكد من توحيد الكتابة مع بيانات Excel لتجنب عدم التطابق
+Private Const VAL_MALE   As String = "ذكر"
+Private Const VAL_FEMALE As String = "انثى"
+
+' قيم جنس الكادر في جدول المدارس
+Private Const TEACHER_MALE_WORD   As String = "ذكور"
+Private Const TEACHER_FEMALE_WORD As String = "اناث"
+Private Const TEACHER_MIXED_WORD  As String = "مختلط"
+
+' قيم جنس طلاب المدرسة في جدول المدارس
+Private Const STUDENT_MALE_WORD   As String = "بنين"   ' UnUsed
+Private Const STUDENT_FEMALE_WORD As String = "بنات"   ' UnUsed
+Private Const STUDENT_MIXED_WORD  As String = "مختلطة" ' UnUsed
+
+' مادة خاصة تحتاج تدقيقاً على جنس الطلاب لا جنس الكادر
+Private Const SUBJECT_SPORT As String = "التربية الرياضية"
+
+' رتب المدارس (مستخدمة في حساب درجة الحاجة والرسائل التوضيحية)
+Private Const RANK_SECONDARY    As String = "ثانوية"
+Private Const RANK_PREPARATORY  As String = "اعدادية"
+Private Const RANK_INTERMEDIATE As String = "متوسطة" ' Unused Now
+
+
+' الحد الأدنى للفائض المسموح بالنقل منه (حد العتبة)
+' إذا كان فائض المدرسة الحالية أقل من هذا الحد، لا يُسمح بالنقل
+' إلا في حالات استثنائية محددة في جدول القرار
+Private Const MIN_EQUAL_SURPLUS As Long = 2
+
+
+' الحد الأقصى للفجوة بين درجتي حاجة المدرستين لقبول النقل وفق قاعدة الفائض والشاغر
+' إذا تجاوزت الفجوة هذا الحد وكانت الجديدة ليست أحوج، يُرفض النقل
+Private Const MAX_NEED_DIFF As Long = 100
+
+' هامش تقييم ما بعد النقل (نسبة مئوية): التدهور الأقل من هذا الهامش يُعد "مقبولاً"
+Private Const EVAL_MARGIN As Double = 0.05  ' 5%
+
+
+' نوع النقل - يُمرَّر لـ SaveTransferResult لاختيار صياغة التفاصيل
+Private Const TRANSFER_TYPE_GEO     As String = "Geo"
+Private Const TRANSFER_TYPE_SURPLUS As String = "Surplus"
+
+
+' النصوص الافتراضية عند غياب البيانات في أعمدة التدقيق (21-30)
+Private Const EMPTY_NO_SCHOOL           As String = "المدرسة غير موجودة"
+Private Const EMPTY_NOT_SPECIFIED       As String = "لم تُحدد"
+Private Const EMPTY_NO_ASSIGNMENT       As String = "لا يوجد تكليف"
+Private Const EMPTY_NOT_CHOSEN          As String = "لم يُحدد"
+Private Const EMPTY_SUBJECT_MISSING     As String = "المادة غير موجودة"
+Private Const EMPTY_VALUE_NOT_NUMERIC   As String = "القيمة غير رقمية"
+
+
+' أول صف للبيانات في جدول الطلبات (الصفان 1 و2 رؤوس أعمدة)
+Private Const FIRST_ROW_REQUESTS As Long = 3
+
+
+' أول صف يحتوي بيانات المدارس (بعد العناوين)
+Private Const FIRST_ROW_SCHOOLS     As Long = 4
+
+
+'=============================================================
+' الإجراء الرئيسي - نقطة البداية الوحيدة لتشغيل النظام
+'=============================================================
+Sub RunSmartTransferSystem()
+
+    On Error GoTo ErrorHandler
+
+    ' إيقاف تحديث الشاشة والحساب التلقائي لتسريع التنفيذ بشكل كبير
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    ' المجموعات الجغرافية - النقل الجغرافي مسموح بين A وB في الاتجاهين فقط
+    ' المجموعة A: المناطق القريبة من مركز المحافظة
+    Dim groupA As Variant: groupA = Array("مركز كربلاء", "الحر", "الحسينية", "عين التمر")
+    ' المجموعة B: المناطق البعيدة عن مركز المحافظة
+    Dim groupB As Variant: groupB = Array("مركز الهندية", "الجدول الغربي", "الخيرات")
+
+    ' أصحاب الشهادات العليا لا يُنقلون لمدارس مسائية (قرار وزاري)
+    Dim highDegrees As Variant: highDegrees = HighDegreesList()
+
+    ' تعيين ورقتي العمل الرئيسيتين
+    Dim wsS As Worksheet: Set wsS = Schools
+    Dim wsR As Worksheet: Set wsR = Requests
+
+    ' حساب آخر صف يحتوي بيانات في جدول الطلبات (من العمود الأول)
+    Dim lastRow As Long: lastRow = GetLastDataRow(wsR, 1)
+
+    ' ===== عدادات الإحصاء - تتراكم طوال التشغيل =====
+    Dim cntSwap      As Long  ' عدد المنقولين بالتبادل
+    Dim cntGeo       As Long  ' عدد المنقولين جغرافياً (عقد فقط)
+    Dim cntSurplus   As Long  ' عدد المنقولين بالفائض والشاغر
+    Dim cntRenewal   As Long  ' عدد حالات تجديد التكليف
+    Dim cntStabilize As Long  ' عدد حالات تثبيت التكليف
+    Dim cntFailed    As Long  ' عدد من لم يتحقق نقلهم (يُحسب فعلياً في النهاية)
+
+    ' ===== مسح نتائج التشغيل السابق (الطلبات + داخل/خارج في المدارس) =====
+    ClearRequestResults wsR, lastRow
+    ClearSchoolInOutCounters wsS
+
+    ' ================================================================
+    ' الخطوة 1: النقل الجغرافي (للعقود فقط) + النقل بالفائض والشاغر (للجميع)
+    ' ================================================================
+    RunGeoAndSurplusTransfers wsS, wsR, lastRow, groupA, groupB, highDegrees, _
+                              cntGeo, cntSurplus
+
+    ' ================================================================
+    ' الخطوة 2: تجديد التكليف (للمكلَّفين الذين لم يُنقَلوا ويرغبون في البقاء)
+    ' ================================================================
+    RunSecondmentRenewal wsS, wsR, lastRow, cntRenewal, cntStabilize
+
+    ' ================================================================
+    ' الخطوة 3: النقل بالتبادل (يُجرى في النهاية بعد استقرار الفائض والشاغر)
+    ' السبب: دمجه مع خطوة الفائض والشاغر في جولة واحدة كان يُعطل قرارات
+    ' الفائض لأن التبادل يُغيِّر الكادر في مدرستين في آنٍ واحد — تأجيله إلى ما
+    ' بعد استقرار الفائض يضمن دقة أعلى في تقييم باقي الطلبات، ثم يُكمَّل بالمتبقين
+    ' ================================================================
+    RunSwapTransfers wsS, wsR, lastRow, highDegrees, cntSwap
+
+    ' ===== الخطوة 4: كتابة الحالة الإدارية (نقل / تكليف / تغيير جهة تكليف / إنهاء تكليف / يرد الطلب) =====
+    UpdateStatusColumn wsS, wsR, lastRow
+
+    ' ===== الخطوة 5: تقييم ما بعد النقل - تحليل النتائج بناءً على الفائض والشاغر النهائي =====
+    EvaluatePostTransfer wsS, wsR, lastRow
+
+    ' ===== الخطوة 6: تعبئة بيانات الحصص والكادر في الأعمدة 21-30 لتسهيل التدقيق اليدوي =====
+    FillHoursAndStaffData wsS, wsR, lastRow
+
+    GoTo CleanExit
+
+ErrorHandler:
+    ' عرض رسالة خطأ مفصّلة باللغة العربية مع دعم RTL
+    MsgBox "حدث خطأ أثناء معالجة النقل:" & vbNewLine & _
+           "رقم الخطأ : " & Err.Number & vbNewLine & _
+           "التفاصيل  : " & Err.Description, _
+           vbCritical + MB_RIGHT + MB_RTLREADING, "خطأ في نظام النقل"
+
+CleanExit:
+    ' استعادة إعدادات التطبيق دائماً حتى عند وقوع خطأ
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+
+    ' عرض ملخص إحصائي بعد اكتمال التشغيل بنجاح
+    If Err.Number = 0 Then
+        cntFailed = CountFailedRequests(wsR, lastRow)
+        ShowSummary cntGeo, cntSurplus, cntSwap, cntRenewal, cntStabilize, cntFailed
+    End If
+
+End Sub
+
+
+'=============================================================
+' الخطوتان 1 و2: النقل الجغرافي للعقود ثم النقل بالفائض والشاغر للجميع
+' المدخلات:
+'   wsS, wsR    : ورقتا المدارس والطلبات
+'   lastRow     : آخر صف بيانات في الطلبات
+'   groupA/B    : المجموعات الجغرافية
+'   highDegrees : قائمة الشهادات العليا
+' المخرجات (ByRef):
+'   cntGeo      : عدد المنقولين جغرافياً
+'   cntSurplus  : عدد المنقولين بالفائض والشاغر
+'
+' الفكرة: تتكرر الجولات طالما نجح نقل واحد، لأن كل نقل يُغيِّر الفائض
+'         وقد يفتح فرصة لمدرس كان مرفوضاً في الجولة السابقة
+'=============================================================
+Private Sub RunGeoAndSurplusTransfers(wsS As Worksheet, wsR As Worksheet, lastRow As Long, _
+                                      groupA As Variant, groupB As Variant, highDegrees As Variant, _
+                                      ByRef cntGeo As Long, ByRef cntSurplus As Long)
+
+    ' متغيرات بيانات المدرس الحالي
+    Dim i           As Long
+    Dim anyTransfer As Boolean
+    Dim qual        As String
+    Dim gender      As String
+    Dim empType     As String
+    Dim resid       As String
+    Dim subj        As String
+    Dim fromSch     As String
+    Dim subjCol     As Long
+
+    ' متغيرات اختيار أفضل مدرسة
+    Dim bestSchool As String
+    Dim bestOptNum As Long
+    Dim bestScore  As Long
+
+    ' مصفوفتا أسباب الرفض: العادية + الجغرافية
+    Dim rejects(1 To 3)    As String
+    Dim geoRejects(1 To 3) As String
+    Dim k As Long
+
+    Do
+        anyTransfer = False ' إعادة ضبط علامة النجاح قبل كل جولة
+
+        For i = FIRST_ROW_REQUESTS To lastRow
+
+            ' تجاوز من تم نقله مسبقاً (من جولة سابقة)
+            If wsR.Cells(i, COL_REQ_TRANSFERRED).Value <> "" Then GoTo NextRequest
+
+            ' قراءة بيانات المدرس من جدول الطلبات
+            qual = Trim(wsR.Cells(i, COL_REQ_QUALIFICATION).Value)   ' التحصيل
+            gender = Trim(wsR.Cells(i, COL_REQ_GENDER).Value)        ' الجنس
+            empType = Trim(wsR.Cells(i, COL_REQ_EMPLOYMENT).Value)   ' نوع التوظيف
+            resid = Trim(wsR.Cells(i, COL_REQ_RESIDENCE).Value)      ' منطقة السكن
+            subj = Trim(wsR.Cells(i, COL_REQ_SUBJECT).Value)         ' المادة
+
+            ' المدرسة الفعلية: التكليف يحل محل الأصلية إن وُجد (مصدر موحَّد)
+            fromSch = GetEffectiveSchool(wsR, i)
+
+            ' إذا لم توجد المادة في جدول المدارس: سجّل الخطأ وتجاوز هذا الطلب
+            If Not FindSubjectColumn(wsS, subj, subjCol) Then
+                wsR.Cells(i, COL_REQ_NOTES).Value = "لم يتحقق أي خيار"
+                wsR.Cells(i, COL_REQ_REASONS).Value = "المادة غير موجودة في جدول المدارس"
+                GoTo NextRequest
+            End If
+
+            ' تهيئة مصفوفتي الرفض قبل بدء الفحص لهذا الطلب
+            For k = 1 To 3: rejects(k) = "": geoRejects(k) = "": Next k
+            bestSchool = "": bestOptNum = 0: bestScore = -999999
+
+            '--- المسار الجغرافي: للعقود فقط، بلا شرط فائض أو شاغر ---
+            ' الشرط 1: منطقة سكنه في مجموعة مختلفة عن مجموعة مدرسته الحالية (بُعد جغرافي)
+            ' الشرط 2: المدرسة المطلوبة في نفس مجموعة منطقة سكنه (تقريب من السكن)
+            If empType = VAL_CONTRACT Then
+                CheckAllChoices wsS, wsR, i, fromSch, gender, qual, resid, _
+                                subjCol, highDegrees, groupA, groupB, _
+                                True, bestSchool, bestOptNum, bestScore, geoRejects
+                If bestSchool <> "" Then
+                    ' نجح المسار الجغرافي: نفّذ النقل وسجّل النتيجة
+                    SaveTransferResult wsS, wsR, i, fromSch, bestSchool, bestOptNum, _
+                                        subjCol, geoRejects, TRANSFER_TYPE_GEO
+                    anyTransfer = True
+                    cntGeo = cntGeo + 1
+                    GoTo NextRequest
+                End If
+                ' فشل الجغرافي: انسخ أسبابه مبدئياً إلى rejects
+                ' إذا رفض مسار الفائض خياراً بدوره، سيستبدل CheckAllChoices
+                ' rejects(c) بأسباب الفائض (لا يجمعهما) — وهو السلوك المقصود:
+                ' نعرض أسباب المسار الأشمل (الفائض) لا المسار الأضيق (الجغرافي)
+                For k = 1 To 3: rejects(k) = geoRejects(k): Next k
+                bestSchool = "": bestOptNum = 0: bestScore = -999999
+            End If
+
+            '--- مسار الفائض والشاغر: للملاك دائماً وللعقود الفاشلة جغرافياً ---
+            ' شروط القبول (راجع جدول القرارات في رأس الملف):
+            '   - الأصلية عندها فائض + الجديدة عندها شاغر
+            '   - الأصلية فائضها أكثر من الجديدة
+            '   - الفائض متساوٍ وكلاهما >= ضعف حد العتبة MIN_EQUAL_SURPLUS
+            '   - نقل من فائض أقل إلى فائض أكبر مسموح فقط إذا كان كلاهما >= حد العتبة
+            CheckAllChoices wsS, wsR, i, fromSch, gender, qual, resid, _
+                            subjCol, highDegrees, groupA, groupB, _
+                            False, bestSchool, bestOptNum, bestScore, rejects
+            If bestSchool <> "" Then
+                ' نجح مسار الفائض: نفّذ النقل وسجّل النتيجة
+                SaveTransferResult wsS, wsR, i, fromSch, bestSchool, bestOptNum, _
+                                    subjCol, rejects, TRANSFER_TYPE_SURPLUS
+                anyTransfer = True
+                cntSurplus = cntSurplus + 1
+                GoTo NextRequest
+            End If
+
+            ' فشل كلا المسارين: سجّل أسباب الرفض التفصيلية في العمود 18
+            ' ملاحظة دقيقة: rejects(k) يحتوي على سبب مسار الفائض لكل خيار (رُفض فيه)
+            ' وسبب مسار الجغرافي لكل خيار لم يُختبر في مسار الفائض أو نجح فيه
+            wsR.Cells(i, COL_REQ_NOTES).Value = "لم يتحقق أي خيار"
+            wsR.Cells(i, COL_REQ_REASONS).Value = BuildResultText(rejects, 0, "")
+
+NextRequest:
+        Next i
+    Loop While anyTransfer ' كرّر طالما في الجولة الأخيرة نقل واحد على الأقل
+End Sub
+
+
+'=============================================================
+' فحص الخيارات الثلاثة وإيجاد أفضل مدرسة مناسبة
+'
+' isGeoPath = True  -> المسار الجغرافي (يبحث عن مدرسة قرب السكن - للعقود فقط)
+' isGeoPath = False -> مسار الفائض والشاغر بكل شروته (للجميع)
+'
+' النتيجة ترجع عبر المتغيرات ByRef:
+'   bestSchool = أفضل مدرسة قبلت جميع الشروط
+'   bestOptNum = رقم خيارها (1 أو 2 أو 3)
+'   bestScore  = درجة حاجتها (للاختيار عند التعادل بين الخيارات)
+'   rejects    = أسباب رفض كل خيار للتقرير النهائي في العمود 18
+'=============================================================
+Private Sub CheckAllChoices( _
+    wsS As Worksheet, wsR As Worksheet, _
+    rowIdx As Long, fromSch As String, _
+    gender As String, qual As String, resid As String, _
+    subjCol As Long, highDegrees As Variant, groupA As Variant, groupB As Variant, _
+    isGeoPath As Boolean, _
+    ByRef bestSchool As String, ByRef bestOptNum As Long, _
+    ByRef bestScore As Long, ByRef rejects() As String)
+
+    ' متغيرات الحلقة الداخلية
+    Dim c            As Long    ' رقم الخيار (1 أو 2 أو 3)
+    Dim toRow        As Long    ' صف المدرسة المطلوبة في جدول المدارس
+    Dim score        As Long    ' درجة حاجة المدرسة المطلوبة
+    Dim choiceSch    As String  ' اسم المدرسة في الخيار الحالي
+    Dim reasons      As String  ' أسباب رفض الخيار الحالي
+    Dim stuGender    As String  ' جنس طلاب المدرسة المطلوبة
+    Dim schGender    As String  ' جنس كادر المدرسة المطلوبة
+    Dim schShift     As String  ' دوام المدرسة المطلوبة
+    Dim schRank      As String  ' رتبة المدرسة المطلوبة
+    Dim schResid     As String  ' منطقة المدرسة المطلوبة
+    Dim rejectReason As String  ' سبب رفض شرط الفائض والشاغر
+
+    ' ===== حساب منطقة المدرسة الحالية مرة واحدة قبل الحلقة =====
+    ' نحتاجها في المسار الجغرافي للتحقق من أن المدرس يعمل بعيداً عن سكنه
+    Dim fromSchRow2  As Long    ' صف المدرسة الحالية في جدول المدارس
+    Dim fromSchResid As String  ' منطقة المدرسة الحالية
+    fromSchResid = ""           ' قيمة افتراضية في حال لم تُوجد المدرسة
+
+    ' قراءة المادة الدراسية من جدول الطلبات (مطلوبة لفحص شرط التربية الرياضية)
+    Dim teacherSubj As String
+    teacherSubj = Trim(wsR.Cells(rowIdx, COL_REQ_SUBJECT).Value)
+
+    ' معالجة حالة غياب المدرسة الحالية من جدول المدارس
+    ' في هذه الحالة لا يمكن تطبيق القاعدة الجغرافية لأن منطقتها مجهولة
+    ' نُوقف المعالجة الجغرافية مبكراً ونترك رسالة واضحة في rejects
+    If isGeoPath Then
+        If Not FindSchoolRow(wsS, fromSch, fromSchRow2) Then
+            ' المدرسة الحالية غير موجودة في الجدول: ضع الرسالة في الخيارات الثلاثة
+            For c = 1 To 3
+                rejects(c) = "المدرسة الحالية [" & fromSch & "] غير موجودة في جدول المدارس"
+            Next c
+            Exit Sub  ' لا فائدة من متابعة الفحص الجغرافي
+        End If
+        ' المدرسة موجودة: اقرأ منطقتها
+        fromSchResid = Trim(wsS.Cells(fromSchRow2, SCH_RESIDENCE).Value)
+    End If
+
+    ' حساب الشرط الجغرافي الأول مرة واحدة قبل الحلقة
+    ' لأن نتيجته ثابتة لجميع الخيارات الثلاثة (تعتمد على السكن والمدرسة الحالية فقط)
+    ' بينما الشرط الثاني يتغير بحسب كل خيار فيبقى داخل الحلقة
+    Dim geoCondition1Met As Boolean
+    geoCondition1Met = True  ' افتراضي صحيح لمسار الفائض (لا يُستخدم هناك)
+    If isGeoPath Then
+        geoCondition1Met = IsGeographicException(resid, fromSchResid, groupA, groupB)
+    End If
+
+    ' الحلقة الرئيسية: فحص كل خيار من الخيارات الثلاثة
+    For c = 1 To 3
+        choiceSch = Trim(wsR.Cells(rowIdx, COL_REQ_CHOICE1 + c - 1).Value)
+        reasons = "": toRow = 0  ' إعادة تهيئة لكل خيار
+
+        ' تجاوز الخيار الفارغ أو إذا كانت المدرسة المطلوبة هي المدرسة الحالية، لأن هذه الحالة تُعالج ضمن إجراءات التجديد أو تثبيت التكليف
+        If choiceSch = "" Or fromSch = choiceSch Then GoTo NextChoice
+
+        ' البحث عن المدرسة المطلوبة في جدول المدارس
+        If Not FindSchoolRow(wsS, choiceSch, toRow) Then
+            rejects(c) = "المدرسة غير موجودة في الجدول": GoTo NextChoice
+        End If
+
+        ' قراءة بيانات المدرسة المطلوبة من جدول المدارس
+        stuGender = Trim(wsS.Cells(toRow, SCH_STUDENTS_GENDER).Value) ' جنس طلبة المدرسة / خاص بمادة التربية الرياضية
+        schGender = Trim(wsS.Cells(toRow, SCH_STAFF_GENDER).Value)    ' جنس كادر المدرسة
+        schShift = Trim(wsS.Cells(toRow, SCH_SHIFT).Value)            ' الدوام
+        schRank = Trim(wsS.Cells(toRow, SCH_RANK).Value)              ' الرتبة
+        schResid = Trim(wsS.Cells(toRow, SCH_RESIDENCE).Value)        ' القطاع
+
+        ' ===== فحوصات المسار الجغرافي (للعقود فقط) =====
+        If isGeoPath Then
+            ' الشرط 1: نتيجته محسوبة مسبقاً قبل الحلقة (لا تتغير بين الخيارات)
+            ' يتحقق من أن المدرس يعمل حالياً بعيداً عن منزله
+            If Not geoCondition1Met Then
+                rejects(c) = "مدرسته الحالية في نفس منطقة سكنه (لا يوجد بُعد جغرافي)"
+                GoTo NextChoice
+            End If
+            ' الشرط 2: يختلف بحسب كل خيار لذا يبقى داخل الحلقة
+            ' يتحقق من أن المدرسة المطلوبة في نفس مجموعة سكن المدرس
+            If Not IsSameGroup(resid, schResid, groupA, groupB) Then
+                rejects(c) = "المدرسة المطلوبة ليست في نفس منطقة سكنه"
+                GoTo NextChoice
+            End If
+        End If
+
+        ' ===== القيود العامة المشتركة: جنس + شهادة عليا =====
+        ' يستخدم الدالة الموحَّدة CheckBasicRestrictions بدلاف من تكرار الكود
+        ' (مشتركة بين المسار الجغرافي ومسار الفائض على حدٍّ سواء)
+        reasons = CheckBasicRestrictions(gender, qual, stuGender, schGender, schRank, schShift, highDegrees, teacherSubj)
+
+        ' ===== فحص شرط الفائض والشاغر (مسار الفائض فقط، لا يُطبَّق جغرافياً) =====
+        If Not isGeoPath Then
+            rejectReason = GetTransferRejectReason(wsS, fromSch, choiceSch, subjCol)
+            If rejectReason <> "" Then reasons = AddReason(reasons, rejectReason)
+        End If
+
+        ' تقييم النتيجة النهائية للخيار الحالي
+        If reasons <> "" Then
+            rejects(c) = reasons  ' مرفوض: احفظ الأسباب للتقرير النهائي
+        Else
+            ' مقبول: احتفظ بالمدرسة الأعلى حاجةً عند التعادل بين الخيارات
+            ' بمعنى: إذا نجح خياران، نختار الأكثر حاجة للكادر
+            score = GetSchoolNeedScore(wsS, toRow, subjCol)
+            If score > bestScore Then
+                bestScore = score           ' حدّث أعلى درجة
+                bestSchool = choiceSch      ' احفظ اسم المدرسة الفائزة
+                bestOptNum = c              ' احفظ رقم خيارها
+            End If
+        End If
+
+NextChoice:
+    Next c
+End Sub
+
+
+'=============================================================
+' تنفيذ النقل: تحديث الكادر + إعادة الحساب + تسجيل النتائج
+'
+' الخطوات:
+'   1) الأصلية تنقص 1، الجديدة تزيد 1 في عمود الكادر
+'   2) تحديث حقلَي داخل/خارج عبر الدالة الموحَّدة UpdateInOutCounters
+'   3) إعادة حساب الفائض والشاغر في المدرستين (استدعاء CalcSurplusAndVacancy)
+'   4) كتابة النتائج التفصيلية في الأعمدة 14 و15 و18
+'   5) العمود 17 (الحالة) يُكتب لاحقاً في UpdateStatusColumn
+'
+' ملاحظة: معالجة صريحة لحالة عدم وجود المدرسة في الجدول
+'         بدلاً من الخروج الصامت الذي يُخفي الخطأ عن المستخدم
+'=============================================================
+Private Sub SaveTransferResult( _
+    wsS As Worksheet, wsR As Worksheet, _
+    rowIdx As Long, fromSch As String, toSch As String, optNum As Long, _
+    subjCol As Long, rejects() As String, transferType As String)
+
+    ' متغيرات لإيجاد صفوف المدرستين
+    Dim fromRow As Long, toRow As Long
+
+    ' التحقق من وجود المدرستين في جدول المدارس
+    If Not FindSchoolRow(wsS, fromSch, fromRow) Then
+        wsR.Cells(rowIdx, COL_REQ_REASONS).Value = _
+            "خطأ: المدرسة الحالية [" & fromSch & "] غير موجودة في جدول المدارس"
+        Exit Sub
+    End If
+    If Not FindSchoolRow(wsS, toSch, toRow) Then
+        wsR.Cells(rowIdx, COL_REQ_REASONS).Value = _
+            "خطأ: المدرسة المطلوبة [" & toSch & "] غير موجودة في جدول المدارس"
+        Exit Sub
+    End If
+
+    ' قراءة البيانات قبل التحديث (لنعرضها في التقرير)
+    Dim fromStaff As Long: fromStaff = CLng(wsS.Cells(fromRow, subjCol + OFF_STAFF).Value)
+    Dim fromHours As Long: fromHours = CLng(wsS.Cells(fromRow, subjCol).Value)
+    Dim fromSurplus As Long: fromSurplus = CLng(wsS.Cells(fromRow, subjCol + OFF_SURPLUS).Value)
+    Dim fromVacancy As Long: fromVacancy = CLng(wsS.Cells(fromRow, subjCol + OFF_VACANCY).Value)
+
+    Dim toStaff As Long: toStaff = CLng(wsS.Cells(toRow, subjCol + OFF_STAFF).Value)
+    Dim toHours As Long: toHours = CLng(wsS.Cells(toRow, subjCol).Value)
+    Dim toSurplus As Long: toSurplus = CLng(wsS.Cells(toRow, subjCol + OFF_SURPLUS).Value)
+    Dim toVacancy As Long: toVacancy = CLng(wsS.Cells(toRow, subjCol + OFF_VACANCY).Value)
+
+    ' حساب درجة الحاجة قبل النقل (لإظهار مدى التحسن في التقرير)
+    Dim fromScore As Long: fromScore = GetSchoolNeedScore(wsS, fromRow, subjCol, 0)
+    Dim toScore As Long: toScore = GetSchoolNeedScore(wsS, toRow, subjCol, 0)
+
+    ' بناء النص التفصيلي للقبول - يعتمد على نوع النقل
+    Dim details As String
+    details = "تم " & IIf(transferType = TRANSFER_TYPE_GEO, "النقل حسب قاعدة السكن", "النقل حسب الفائض والشاغر") & ":" & Chr(10)
+    details = details & "  - المدرسة الحالية (" & fromSch & "): (" & fromHours & ") حصة, (" & fromStaff & ") مدرس" & _
+          IIf(fromStaff > 1, "ين", "") & ", فائض (" & fromSurplus & ")" & _
+          IIf(fromVacancy > 0, ", شاغر (" & fromVacancy & ")", "") & ", درجة الحاجة (" & fromScore & ")" & Chr(10)
+    details = details & "  - المدرسة الجديدة (" & toSch & "): (" & toHours & ") حصة, (" & toStaff & ") مدرس" & _
+          IIf(toStaff > 1, "ين", "") & ", فائض (" & toSurplus & ")" & _
+          IIf(toVacancy > 0, ", شاغر (" & toVacancy & ")", "") & ", درجة الحاجة (" & toScore & ")" & Chr(10)
+    details = details & "  - فرق الدرجات: (" & fromScore & ") -=> (" & toScore & ")" & _
+              IIf(toScore > fromScore, " (تحسن)", " (لا ينصح به)")
+
+    ' تحديث الكادر: الأصلية تنقص 1، الجديدة تزيد 1
+    wsS.Cells(fromRow, subjCol + OFF_STAFF).Value = fromStaff - 1
+    wsS.Cells(toRow, subjCol + OFF_STAFF).Value = toStaff + 1
+
+    ' تحديث حقلَي داخل/خارج (لأغراض التتبع والتقارير)
+    UpdateInOutCounters wsS, fromRow, subjCol, False   ' خارج من الأصلية
+    UpdateInOutCounters wsS, toRow, subjCol, True      ' داخل إلى الجديدة
+
+    ' إعادة حساب الفائض والشاغر في المدرستين فقط (لتحسين الأداء)
+    ' هذا يؤثر على الجولة التالية من الحلقة الرئيسية
+    Call CalcSurplusAndVacancy(fromSch)
+    Call CalcSurplusAndVacancy(toSch)
+
+    ' تسجيل النتائج في جدول الطلبات
+    wsR.Cells(rowIdx, COL_REQ_TRANSFERRED).Value = toSch
+    wsR.Cells(rowIdx, COL_REQ_NOTES).Value = "الخيار " & optNum
+    wsR.Cells(rowIdx, COL_REQ_REASONS).Value = BuildResultText(rejects, optNum, details)
+
+End Sub
+
+
+'=============================================================
+' الخطوة 2: تجديد/تثبيت التكليف (النسخة المصححة - المحاكاة المزدوجة)
+'
+' التعديل الجوهري:
+'   1. حساب درجة الحاجة للواقع الحالي (One=0) للتوثيق.
+'   2. محاكاة سيناريو "العودة للأصلية" مباشرة دون EvaluateSurplusVacancy:
+'      - الأصلية بعد العودة (One=+1)
+'      - المكلف إليها بعد الفقدان (One=-1)
+'   3. القرار بناءً على الفجوة بين المدرستين:
+'      - إذا كانت الفجوة بعد العودة أصغر من الفجوة الحالية -> العودة أفضل (نرفض التجديد).
+'      - إذا كانت الفجوة بعد العودة أكبر أو تساوي -> التجديد أفضل (نوافق).
+'   4. قبول مباشر إضافي:
+'      أ. المادة موجودة فقط في المكلف إليها.
+'      ب. تساوي الفائض في المدرستين.
+'      ج. الفجوة صغيرة (أقل من MAX_NEED_DIFF) أو المكلف إليها أحوج.
+'=============================================================
+Private Sub RunSecondmentRenewal(wsS As Worksheet, wsR As Worksheet, lastRow As Long, _
+                                  ByRef cntRenewal As Long, ByRef cntStabilize As Long)
+
+    Dim i              As Long
+    Dim assignedSch    As String
+    Dim matchChoice    As Long
+    Dim schRowAssigned As Long
+    Dim schRowOriginal As Long
+    Dim statusText     As String
+
+    ' متغيرات المحاكاة المزدوجة
+    Dim subj    As String
+    Dim subjCol As Long
+
+    ' 1. واقع الحال (المدرس في المكلف إليها)
+    Dim needOriginal_Now As Long
+    Dim needAssigned_Now As Long
+
+    ' 2. محاكاة السيناريو البديل (عودة المدرس للأصلية)
+    Dim needOriginal_After As Long   ' الأصلية بعد عودته (+1)
+    Dim needAssigned_After As Long   ' المكلف إليها بعد فقده (-1)
+
+    ' متغيرات الفجوة بين المدرستين
+    Dim diffNow   As Double   ' الفجوة في الواقع الحالي
+    Dim diffAfter As Double   ' الفجوة بعد العودة الافتراضية
+
+    ' --- متغيرات فحص الشهادة العليا وشرط الجنس ---
+    Dim qual        As String
+    Dim schShift    As String
+    Dim highDegrees As Variant
+    highDegrees = HighDegreesList()
+
+    Dim studentGender      As String
+    Dim teacherGender      As String
+    Dim schGender          As String
+    Dim schRank            As String
+    Dim genderRejectReason As String
+
+    ' --- متغيرات الفائض للاستثناء ---
+    Dim fromSurplus As Long   ' فائض الأصلية
+    Dim toSurplus   As Long   ' فائض المكلف إليها
+    Dim fromVacancy As Long   ' شاغر الأصلية
+    Dim toVacancy   As Long   ' شاغر المكلف إليها
+
+    For i = FIRST_ROW_REQUESTS To lastRow
+
+        '--- الشرط 1: لم يُنقَل ---
+        If wsR.Cells(i, COL_REQ_TRANSFERRED).Value <> "" Then GoTo NextRenewal
+
+        '--- الشرط 2: مكلَّف حالياً ---
+        assignedSch = Trim(wsR.Cells(i, COL_REQ_ASSIGNED_SCHOOL).Value)
+        If assignedSch = "" Then GoTo NextRenewal
+
+        '--- الشرط 3: مدرسة التكليف ضمن خياراته ---
+        matchChoice = FindChoiceNumber(wsR, i, assignedSch)
+        If matchChoice = 0 Then GoTo NextRenewal
+
+        '--- تجهيز بيانات المادة والصفوف ---
+        subj = Trim(wsR.Cells(i, COL_REQ_SUBJECT).Value)
+        If Not FindSubjectColumn(wsS, subj, subjCol) Then GoTo NextRenewal
+
+        Dim originalSch As String
+        originalSch = Trim(wsR.Cells(i, COL_REQ_ORIGINAL_SCHOOL).Value)
+        If Not FindSchoolRow(wsS, originalSch, schRowOriginal) Then GoTo NextRenewal
+        If Not FindSchoolRow(wsS, assignedSch, schRowAssigned) Then GoTo NextRenewal
+
+        '--- فحص إضافي: هل المكلف إليها تدرِّس المادة أصلاً؟ ---
+        If wsS.Cells(schRowAssigned, subjCol).Value = 0 Then GoTo NextRenewal
+
+        '--- فحص الشروط الاساسية (حملة الشهادة العليا + شرط الجنس) ---
+        '--- تجهيز بيانات فحص القيود العامة (الجنس + الشهادة العليا) ---
+        teacherGender = Trim(wsR.Cells(i, COL_REQ_GENDER).Value)
+        qual = Trim(wsR.Cells(i, COL_REQ_QUALIFICATION).Value)
+        studentGender = Trim(wsS.Cells(schRowAssigned, SCH_STUDENTS_GENDER).Value)
+        schGender = Trim(wsS.Cells(schRowAssigned, SCH_STAFF_GENDER).Value)
+        schRank = Trim(wsS.Cells(schRowAssigned, SCH_RANK).Value)
+        schShift = Trim(wsS.Cells(schRowAssigned, SCH_SHIFT).Value)
+
+        genderRejectReason = CheckBasicRestrictions(teacherGender, qual, studentGender, schGender, schRank, schShift, highDegrees, subj)
+        If genderRejectReason <> "" Then
+            AppendRenewalRejection wsR, i, genderRejectReason
+            GoTo NextRenewal
+        End If
+
+        '=============================================================
+        ' [قبول مباشر أ]: المادة موجودة فقط في المكلف إليها
+        ' إذا كانت حصص الأصلية = 0، فالمدرس لا يمكنه العودة إليها أصلاً
+        '=============================================================
+        If wsS.Cells(schRowOriginal, subjCol).Value = 0 Then
+            statusText = DetermineRenewalStatus(wsS, wsR, i, schRowAssigned)
+            CommitRenewalDecision wsR, i, assignedSch, matchChoice, statusText, _
+                SepLine() & vbNewLine & vbNewLine & _
+                statusText & " (قبول مباشر):" & Chr(10) & _
+                "  - المادة (" & subj & ") غير موجودة في المدرسة الأصلية." & Chr(10) & _
+                "  - لا يمكن العودة إليها، لذا التجديد/التثبيت هو الخيار الوحيد.", _
+                cntRenewal, cntStabilize
+            GoTo NextRenewal
+        End If
+
+        '=============================================================
+        ' [قبول مباشر ب]: تساوي الفائض في المدرستين
+        ' إذا كان فائض الأصلية مساوياً لفائض المكلف إليها،
+        ' فهذا يعني أنه لا توجد أفضلية لإحداهما، والتجديد أفضل للاستقرار.
+        '=============================================================
+        fromSurplus = CLng(wsS.Cells(schRowOriginal, subjCol + OFF_SURPLUS).Value)
+        toSurplus = CLng(wsS.Cells(schRowAssigned, subjCol + OFF_SURPLUS).Value)
+        fromVacancy = CLng(wsS.Cells(schRowOriginal, subjCol + OFF_VACANCY).Value)
+        toVacancy = CLng(wsS.Cells(schRowAssigned, subjCol + OFF_VACANCY).Value)
+
+        If (fromSurplus >= 3) Or _
+           ((fromSurplus < 3 And fromSurplus = toSurplus) And _
+            (fromVacancy = 0 And toVacancy = 0)) Then
+
+            statusText = DetermineRenewalStatus(wsS, wsR, i, schRowAssigned)
+            CommitRenewalDecision wsR, i, assignedSch, matchChoice, statusText, _
+                SepLine() & vbNewLine & vbNewLine & _
+                statusText & " (قبول مباشر):" & Chr(10) & _
+                "  - فائض المدرسة الأصلية (" & fromSurplus & ") = فائض المكلف إليها (" & toSurplus & ")." & Chr(10) & _
+                "  - لا أفضلية لإحداهما، التجديد/التثبيت أفضل للاستقرار.", _
+                cntRenewal, cntStabilize
+            GoTo NextRenewal
+        End If
+
+        '=============================================================
+        ' [المحاكاة المزدوجة] - حساب الحاجة قبل وبعد افتراض العودة
+        '=============================================================
+
+        ' 1. الواقع الحالي (المدرس موجود في المكلف إليها)
+        needOriginal_Now = GetSchoolNeedScore(wsS, schRowOriginal, subjCol, 0)
+        needAssigned_Now = GetSchoolNeedScore(wsS, schRowAssigned, subjCol, 0)
+        diffNow = Abs(needAssigned_Now - needOriginal_Now)
+
+        ' 2. محاكاة العودة إلى الأصلية
+        needOriginal_After = GetSchoolNeedScore(wsS, schRowOriginal, subjCol, 1)   ' الأصلية تستقبله
+        needAssigned_After = GetSchoolNeedScore(wsS, schRowAssigned, subjCol, -1)  ' المكلف إليها تفقده
+        diffAfter = Abs(needAssigned_After - needOriginal_After)
+
+        '=============================================================
+        ' [قرار مرن] - هامش MAX_NEED_DIFF نقطة
+        ' إذا كانت الفجوة بعد العودة صغيرة جداً (< MAX_NEED_DIFF)،
+        ' أو كانت المكلف إليها (بعد افتراض بقائه) أحوج من الأصلية (بعد افتراض عودته)،
+        ' نوافق على التجديد/التثبيت.
+        '=============================================================
+        If (diffAfter >= diffNow And fromVacancy = 0) Then
+            ' --- الموافقة على التجديد/التثبيت (بسبب الهامش أو كون المكلف إليها أحوج) ---
+            statusText = DetermineRenewalStatus(wsS, wsR, i, schRowAssigned)
+            CommitRenewalDecision wsR, i, assignedSch, matchChoice, statusText, _
+                BuildRenewalSimReason(statusText & " (مرونة)", assignedSch, matchChoice, _
+                    needAssigned_Now, needOriginal_Now, diffNow, _
+                    needAssigned_After, needOriginal_After, diffAfter, _
+                    "  - القرار: التجديد/التثبيت أفضل لأن الفجوة صغيرة (< " & MAX_NEED_DIFF & ") أو المكلف إليها أحوج."), _
+                cntRenewal, cntStabilize
+            GoTo NextRenewal
+        End If
+
+        '--- اتخاذ القرار بناءً على الفجوة بين المدرستين ---
+        ' إذا كانت الفجوة بعد العودة أصغر من الفجوة الحالية، فالعودة مفيدة (نرفض التجديد).
+        ' وإلا فالتجديد هو الأفضل (نوافق).
+        If diffAfter <= diffNow Then
+            ' --- رفض التجديد لأن العودة أفضل ---
+            wsR.Cells(i, COL_REQ_REASONS).Value = wsR.Cells(i, COL_REQ_REASONS).Value & _
+                SepLine() & vbNewLine & vbNewLine & _
+                "لم يتم التجديد/التثبيت: العودة للمدرسة الأصلية تُحسِّن التوازن." & Chr(10) & _
+                "  - [الواقع الحالي]: حاجة المكلف إليها (" & needAssigned_Now & ") | حاجة الأصلية (" & needOriginal_Now & ") | الفجوة: " & Format(diffNow, "0.0") & Chr(10) & _
+                "  - [محاكاة العودة]: حاجة المكلف إليها بغيابه (" & needAssigned_After & ") | حاجة الأصلية بعودته (" & needOriginal_After & ") | الفجوة: " & Format(diffAfter, "0.0") & Chr(10) & _
+                "  - القرار: الفجوة بعد العودة أصغر، لذا العودة أفضل."
+            GoTo NextRenewal
+        End If
+
+        ' --- الموافقة على التجديد/التثبيت (لأن العودة لا تحسّن الوضع) ---
+        statusText = DetermineRenewalStatus(wsS, wsR, i, schRowAssigned)
+        CommitRenewalDecision wsR, i, assignedSch, matchChoice, statusText, _
+            BuildRenewalSimReason(statusText, assignedSch, matchChoice, _
+                needAssigned_Now, needOriginal_Now, diffNow, _
+                needAssigned_After, needOriginal_After, diffAfter, _
+                "  - القرار: التجديد/التثبيت أفضل لأن العودة لا تُقلِّص الفجوة."), _
+            cntRenewal, cntStabilize
+
+NextRenewal:
+    Next i
+
+End Sub
+
+
+'=============================================================
+' دالة مساعدة موحَّدة: تسجيل قبول التجديد/التثبيت وتحديث العدّادات
+' المدخلات:
+'   wsR          : ورقة الطلبات
+'   rowIdx       : صف الطلب
+'   assignedSch  : اسم المدرسة المكلف إليها
+'   matchChoice  : رقم الخيار المطابق للتكليف
+'   statusText   : نص الحالة (تثبيت/تجديد)
+'   reasonBlock  : نص الأسباب الذي يُلحق بالعمود 18
+' المخرجات (ByRef):
+'   تحديث cntRenewal أو cntStabilize حسب الحالة
+'
+' السبب: هذه الكتلة كانت مكررة 4 مرات في الكود الأصلي، فجُمِّعت هنا
+'=============================================================
+Private Sub CommitRenewalDecision(wsR As Worksheet, rowIdx As Long, _
+                                  assignedSch As String, matchChoice As Long, _
+                                  statusText As String, reasonBlock As String, _
+                                  ByRef cntRenewal As Long, ByRef cntStabilize As Long)
+
+    wsR.Cells(rowIdx, COL_REQ_TRANSFERRED).Value = assignedSch
+    wsR.Cells(rowIdx, COL_REQ_NOTES).Value = "الخيار " & matchChoice
+    wsR.Cells(rowIdx, COL_REQ_STATUS).Value = statusText
+    wsR.Cells(rowIdx, COL_REQ_REASONS).Value = wsR.Cells(rowIdx, COL_REQ_REASONS).Value & reasonBlock
+
+    If statusText = VAL_STABILIZE Then
+        cntStabilize = cntStabilize + 1
+    Else
+        cntRenewal = cntRenewal + 1
+    End If
+End Sub
+
+
+'=============================================================
+' دالة مساعدة موحَّدة: إلحاق سبب رفض التجديد/التثبيت بالعمود 18
+' المدخلات:
+'   wsR     : ورقة الطلبات
+'   rowIdx  : صف الطلب
+'   reason  : نص السبب
+'
+' السبب: نص رفض التجديد كان مكرراً بنفس الصياغة في موضعين، فجُمِّعت هنا
+'=============================================================
+Private Sub AppendRenewalRejection(wsR As Worksheet, rowIdx As Long, reason As String)
+    wsR.Cells(rowIdx, COL_REQ_REASONS).Value = wsR.Cells(rowIdx, COL_REQ_REASONS).Value & _
+        SepLine() & vbNewLine & vbNewLine & _
+        "لم يتم التجديد/التثبيت: " & reason & Chr(10)
+End Sub
+
+
+'=============================================================
+' دالة مساعدة موحَّدة: بناء نص قبول التجديد/التثبيت لحالات المحاكاة المزدوجة
+' المدخلات: ترويسة الحالة + المدرسة + رقم الخيار + درجات الواقع والمحاكاة + سطر القرار
+' المخرجات: نص الأسباب الجاهز للإلحاق بالعمود 18
+'
+' السبب: نفس قالب التقرير كان مكرراً حرفياً في فرعَي القبول (المرونة والعادي)
+'=============================================================
+Private Function BuildRenewalSimReason(header As String, assignedSch As String, matchChoice As Long, _
+                                       needAssignedNow As Long, needOriginalNow As Long, diffNow As Double, _
+                                       needAssignedAfter As Long, needOriginalAfter As Long, diffAfter As Double, _
+                                       decisionLine As String) As String
+    BuildRenewalSimReason = SepLine() & vbNewLine & vbNewLine & _
+        header & ":" & Chr(10) & _
+        "  - المدرس مكلَّف حالياً في (" & assignedSch & ") ضمن خياره رقم (" & matchChoice & ")" & Chr(10) & _
+        "  - [الواقع الحالي]: حاجة المكلف إليها (" & needAssignedNow & ") | حاجة الأصلية (" & needOriginalNow & ") | الفجوة: " & Format(diffNow, "0.0") & Chr(10) & _
+        "  - [محاكاة العودة]: حاجة المكلف إليها بغيابه (" & needAssignedAfter & ") | حاجة الأصلية بعودته (" & needOriginalAfter & ") | الفجوة: " & Format(diffAfter, "0.0") & Chr(10) & _
+        decisionLine
+End Function
+
+
+'=============================================================
+' الخطوة 3: النقل بالتبادل
+'
+' الشروط المطلوبة لتنفيذ التبادل:
+'   1 - نفس الاختصاص (المادة)
+'   2 - تطابق التحصيل الدراسي
+'   3 - تطابق نوع التوظيف (ملاك مع ملاك، عقد مع عقد)
+'   4 - كل منهما يطلب مدرسة الآخر ضمن خياراته الثلاثة
+'   5 - اجتياز شرط الجنس لكلا المدرسَين في المدرسة المستهدفة
+'   6 - اجتياز شرط الشهادة العليا (عدم النقل لمسائي لحامل شهادة عليا)
+'   7 - وجود حصص فعلية للمادة في كلتا المدرستين (لا صفر)
+'
+'  الميزة: لا يحتاج فائضاً ولا شاغراً، ولا يُغيِّر أعداد الكادر
+'  (كل مدرسة تنقص 1 وتزيد 1 في آنٍ واحد = صفر صافي)
+'  عند تعدد المرشحين: يُختار الأول في ترتيب الجدول (حسب أسبقية الصف)
+' cntSwap: عداد يُحدَّث بكل تبادل ناجح، يُمرَّر ByRef للإجراء الرئيسي
+'=============================================================
+Private Sub RunSwapTransfers(wsS As Worksheet, wsR As Worksheet, _
+                              lastRow As Long, highDegrees As Variant, _
+                              ByRef cntSwap As Long)
+
+    ' عدادات الحلقات الخارجية والداخلية
+    Dim i As Long, j As Long
+
+    ' بيانات المدرس (أ) - الصف i
+    Dim fromSch_A  As String  ' مدرسة المدرس (أ) الحالية
+    Dim subj_A     As String  ' مادة المدرس (أ)
+    Dim gender_A   As String  ' جنس المدرس (أ)
+    Dim qual_A     As String  ' تحصيل المدرس (أ)
+    Dim emp_A      As String  ' نوع توظيف المدرس (أ)
+
+    ' بيانات المدرس (ب) - الصف j
+    Dim fromSch_B  As String  ' مدرسة المدرس (ب) الحالية
+    Dim subj_B     As String  ' مادة المدرس (ب)
+    Dim gender_B   As String  ' جنس المدرس (ب)
+    Dim qual_B     As String  ' تحصيل المدرس (ب)
+    Dim emp_B      As String  ' نوع توظيف المدرس (ب)
+
+    ' متغيرات الفحص والنتائج
+    Dim choiceNum_A As Long     ' رقم الخيار الذي طلب فيه (أ) مدرسة (ب)
+    Dim choiceNum_B As Long     ' رقم الخيار الذي طلب فيه (ب) مدرسة (أ)
+    Dim schRow_A    As Long     ' صف مدرسة (أ) في جدول المدارس
+    Dim schRow_B    As Long     ' صف مدرسة (ب) في جدول المدارس
+    Dim stuGender_A As String   ' جنس طلاب مدرسة (أ)
+    Dim stuGender_B As String   ' جنس طلاب مدرسة (ب)
+    Dim schGender_A As String   ' جنس كادر مدرسة (أ)
+    Dim schGender_B As String   ' جنس كادر مدرسة (ب)
+    Dim schShift_A  As String   ' دوام مدرسة (أ) صباحي/مسائي
+    Dim schShift_B  As String   ' دوام مدرسة (ب) صباحي/مسائي
+    Dim schRank_A   As String   ' رتبة مدرسة (أ)
+    Dim schRank_B   As String   ' رتبة مدرسة (ب)
+    Dim reasons_A   As String   ' أسباب رفض المدرس (أ) نحو مدرسة (ب)
+    Dim reasons_B   As String   ' أسباب رفض المدرس (ب) نحو مدرسة (أ)
+    Dim name_A      As String   ' اسم المدرس (أ)
+    Dim name_B      As String   ' اسم المدرس (ب)
+    Dim swapSubjCol As Long     ' عمود المادة في جدول المدارس
+
+    For i = FIRST_ROW_REQUESTS To lastRow - 1
+        ' تجاوز من تم نقله مسبقاً
+        If wsR.Cells(i, COL_REQ_TRANSFERRED).Value <> "" Then GoTo NextA
+
+        ' قراءة بيانات المدرس (أ)
+        subj_A = Trim(wsR.Cells(i, COL_REQ_SUBJECT).Value)
+        gender_A = Trim(wsR.Cells(i, COL_REQ_GENDER).Value)
+        qual_A = Trim(wsR.Cells(i, COL_REQ_QUALIFICATION).Value)
+        emp_A = Trim(wsR.Cells(i, COL_REQ_EMPLOYMENT).Value)
+        ' المدرسة الفعلية للمدرس (أ): التكليف يحل محل الأصلية (مصدر موحَّد)
+        fromSch_A = GetEffectiveSchool(wsR, i)
+
+        ' الحلقة الداخلية: البحث عن المدرس (ب) المناسب للتبادل
+        ' نبدأ من i+1 لتجنب مقارنة المدرس بنفسه ومنع ازدواجية الفحص
+        For j = i + 1 To lastRow
+            ' تجاوز من تم نقله مسبقاً
+            If wsR.Cells(j, COL_REQ_TRANSFERRED).Value <> "" Then GoTo NextB
+
+            ' قراءة بيانات المدرس (ب)
+            subj_B = Trim(wsR.Cells(j, COL_REQ_SUBJECT).Value)
+            gender_B = Trim(wsR.Cells(j, COL_REQ_GENDER).Value)
+            qual_B = Trim(wsR.Cells(j, COL_REQ_QUALIFICATION).Value)
+            emp_B = Trim(wsR.Cells(j, COL_REQ_EMPLOYMENT).Value)
+            ' المدرسة الفعلية للمدرس (ب): التكليف يحل محل الأصلية (مصدر موحَّد)
+            fromSch_B = GetEffectiveSchool(wsR, j)
+
+            ' الشرط 1: تطابق الاختصاص
+            If subj_A <> subj_B Then GoTo NextB
+
+            ' الشرط 2: تطابق التحصيل الدراسي
+            If qual_A <> qual_B Then GoTo NextB
+
+            ' الشرط 3: تطابق نوع التوظيف (ملاك مع ملاك، عقد مع عقد)
+            If emp_A <> emp_B Then GoTo NextB
+
+            ' الشرط 4: مدرستان مختلفتان (لا معنى لتبادل نفس المدرسة)
+            If fromSch_A = fromSch_B Then GoTo NextB
+
+            ' الشرط 5: (أ) يطلب مدرسة (ب) ضمن خياراته
+            choiceNum_A = FindChoiceNumber(wsR, i, fromSch_B)
+            If choiceNum_A = 0 Then GoTo NextB  ' (أ) لم يطلب مدرسة (ب)
+
+            ' الشرط 6: (ب) يطلب مدرسة (أ) ضمن خياراته
+            choiceNum_B = FindChoiceNumber(wsR, j, fromSch_A)
+            If choiceNum_B = 0 Then GoTo NextB  ' (ب) لم يطلب مدرسة (أ)
+
+            ' البحث عن صفوف المدرستين في جدول المدارس
+            If Not FindSchoolRow(wsS, fromSch_B, schRow_B) Then GoTo NextB
+            If Not FindSchoolRow(wsS, fromSch_A, schRow_A) Then GoTo NextB
+
+            ' قراءة بيانات مدرسة (ب) من جدول المدارس
+            stuGender_B = Trim(wsS.Cells(schRow_B, SCH_STUDENTS_GENDER).Value)
+            schGender_B = Trim(wsS.Cells(schRow_B, SCH_STAFF_GENDER).Value)
+            schShift_B = Trim(wsS.Cells(schRow_B, SCH_SHIFT).Value)
+            schRank_B = Trim(wsS.Cells(schRow_B, SCH_RANK).Value)
+
+            ' قراءة بيانات مدرسة (أ) من جدول المدارس
+            stuGender_A = Trim(wsS.Cells(schRow_A, SCH_STUDENTS_GENDER).Value)
+            schGender_A = Trim(wsS.Cells(schRow_A, SCH_STAFF_GENDER).Value)
+            schShift_A = Trim(wsS.Cells(schRow_A, SCH_SHIFT).Value)
+            schRank_A = Trim(wsS.Cells(schRow_A, SCH_RANK).Value)
+
+            ' فحص القيود العامة للمدرس (أ) نحو مدرسة (ب) (جنس + شهادة عليا)
+            reasons_A = CheckBasicRestrictions(gender_A, qual_A, stuGender_B, schGender_B, schRank_B, _
+                                               schShift_B, highDegrees, subj_A)
+
+            ' فحص القيود العامة للمدرس (ب) نحو مدرسة (أ) (جنس + شهادة عليا)
+            reasons_B = CheckBasicRestrictions(gender_B, qual_B, stuGender_A, schGender_A, schRank_A, _
+                                               schShift_A, highDegrees, subj_B)
+            ' إذا فشل أي شرط في أيٍّ منهما: تجاوز هذا الزوج وابحث عن غيره
+            If reasons_A <> "" Or reasons_B <> "" Then GoTo NextB
+
+            ' شرط الحصص: التحقق من وجود حصص فعلية للمادة في كلا المدرستين
+            ' يمنع التبادل إذا كانت المادة غير موجودة (حصصها = صفر) في أي منهما
+            ' لأن النقل إلى مدرسة لا تحتاج المادة غير منطقي
+            If Not FindSubjectColumn(wsS, subj_A, swapSubjCol) Then GoTo NextB
+            If CLng(wsS.Cells(schRow_B, swapSubjCol).Value) = 0 Then GoTo NextB
+            If CLng(wsS.Cells(schRow_A, swapSubjCol).Value) = 0 Then GoTo NextB
+
+            ' جميع الشروط نجحت - نفّذ التبادل الآن
+            name_A = Trim(wsR.Cells(i, COL_REQ_NAME).Value)  ' اسم المدرس (أ)
+            name_B = Trim(wsR.Cells(j, COL_REQ_NAME).Value)  ' اسم المدرس (ب)
+
+            ' تسجيل نتيجة المدرس (أ): يذهب لمدرسة (ب)
+            RecordSwapResult wsR, i, fromSch_B, choiceNum_A, name_B, fromSch_B
+
+            ' تسجيل نتيجة المدرس (ب): يذهب لمدرسة (أ)
+            RecordSwapResult wsR, j, fromSch_A, choiceNum_B, name_A, fromSch_A
+
+            ' تحديث حقلَي داخل/خارج لكلتا المدرستين
+            ' المدرسة (أ): خرج منها مدرس -> خارج+1 ، ودخل إليها مدرس -> داخل+1
+            UpdateInOutCounters wsS, schRow_A, swapSubjCol, False  ' خارج
+            UpdateInOutCounters wsS, schRow_A, swapSubjCol, True   ' داخل
+            ' المدرسة (ب): خرج منها مدرس -> خارج+1 ، ودخل إليها مدرس -> داخل+1
+            UpdateInOutCounters wsS, schRow_B, swapSubjCol, False  ' خارج
+            UpdateInOutCounters wsS, schRow_B, swapSubjCol, True   ' داخل
+
+            ' كل تبادل يُحسب مدرسَين (أ) و(ب) معاً
+            cntSwap = cntSwap + 2
+            GoTo NextA  ' (أ) تم نقله، انتقل فوراً للمدرس التالي
+
+NextB:
+        Next j
+NextA:
+    Next i
+
+End Sub
+
+
+'=============================================================
+' دالة مساعدة موحَّدة: تسجيل نتيجة طرف واحد من التبادل في جدول الطلبات
+' المدخلات:
+'   wsR        : ورقة الطلبات
+'   rowIdx     : صف المدرس
+'   toSch      : المدرسة المنقول إليها (مدرسة الطرف الآخر)
+'   choiceNum  : رقم الخيار المطابق
+'   partnerName: اسم المدرس الشريك في التبادل
+'   partnerSch : مدرسة الشريك (تُذكَر في تفاصيل التبادل)
+'
+' السبب: كتلة تسجيل نتيجة التبادل كانت مكررة لكلا الطرفين بنفس الصياغة
+'=============================================================
+Private Sub RecordSwapResult(wsR As Worksheet, rowIdx As Long, toSch As String, _
+                             choiceNum As Long, partnerName As String, partnerSch As String)
+    Dim swapDetails As String
+    swapDetails = "تم النقل بالتبادل مع " & partnerName & " من مدرسة " & partnerSch & Chr(10)
+    swapDetails = swapDetails & "  - ملاحظة: التبادل لا يؤثر على أعداد الكادر، تم تبادل المدرستين مباشرة."
+
+    wsR.Cells(rowIdx, COL_REQ_TRANSFERRED).Value = toSch
+    wsR.Cells(rowIdx, COL_REQ_NOTES).Value = "الخيار " & choiceNum
+    wsR.Cells(rowIdx, COL_REQ_SWAP).Value = swapDetails
+    wsR.Cells(rowIdx, COL_REQ_REASONS).Value = swapDetails
+End Sub
+
+
+'=============================================================
+' الخطوة 4: كتابة الحالة الإدارية (نقل / تكليف / تغيير جهة تكليف / إنهاء تكليف / يرد الطلب) في العمود 17
+' يُستدعى بعد اكتمال كل النقلات لأننا نحتاج المدرسة النهائية
+' لمعرفة بيئتها (ريف / حضر) من جدول المدارس ثم تحديد الحالة المناسبة
+' تم تعديلها لتتجاوز الصفوف التي سُجِّلت فيها حالة مسبقًا (مثلاً "تجديد تكليف")
+'=============================================================
+Private Sub UpdateStatusColumn(wsS As Worksheet, wsR As Worksheet, lastRow As Long)
+    Dim i         As Long   ' عداد الصفوف
+    Dim toSchName As String ' اسم المدرسة المنقول إليها
+    Dim fromSch   As String ' المدرسة الأصلية (العمود 9)
+    Dim assigned  As String ' مدرسة التكليف (العمود 10)
+    Dim currentStatus As String ' الحالة الإدارية الحالية
+
+    For i = FIRST_ROW_REQUESTS To lastRow
+    
+    
+        ' المدرسة الجديدة التي تم النقل اليها (ان وجدت)
+        toSchName = Trim(wsR.Cells(i, COL_REQ_TRANSFERRED).Value)
+        
+        ' كتابة "يرد الطلب" في العمود 17 لكل طلب مرفوض
+        If toSchName = "" Then
+            wsR.Cells(i, COL_REQ_STATUS).Value = VAL_REJECTED
+        Else
+            ' إذا كانت الحالة الإدارية قد حُدِّدت مسبقاً (مثلاً بواسطة تجديد التكليف) فلا نعدلها
+            currentStatus = Trim(wsR.Cells(i, COL_REQ_STATUS).Value)
+            If currentStatus <> "" Then GoTo NextStatusRow
+
+            fromSch = Trim(wsR.Cells(i, COL_REQ_ORIGINAL_SCHOOL).Value)
+            assigned = Trim(wsR.Cells(i, COL_REQ_ASSIGNED_SCHOOL).Value)
+
+            ' حالة خاصة: المدرس مكلَّف وعاد لمدرسته الأصلية (إنهاء تكليف)
+            ' الشرط: يوجد تكليف (العمود 10 ممتلئ) + المنقول إليها = مدرسته الأصلية (العمود 9)
+            If assigned <> "" And toSchName = fromSch Then
+                wsR.Cells(i, COL_REQ_STATUS).Value = VAL_SECONDMENT_ENDED
+            Else
+                ' الحالة الطبيعية: نقل أو تكليف أو تغيير جهة تكليف حسب قاعدة الأرياف
+                wsR.Cells(i, COL_REQ_STATUS).Value = GetTransferStatus( _
+                    Trim(wsR.Cells(i, COL_REQ_RURAL_SERVICE).Value), _
+                    Trim(wsR.Cells(i, COL_REQ_EMPLOYMENT).Value), _
+                    wsS, toSchName, assigned)
+            End If
+        End If
+NextStatusRow:
+    Next i
+End Sub
+
+
+'=============================================================
+' تحديد حالة النقل: (نقل) أم (تكليف) أم (تغيير جهة تكليف)؟
+'
+'   عقد                                      -> نقل  (دائماً بغض النظر عن أي شرط)
+'   ملاك + أكمل الأرياف (نعم)               -> نقل
+'   ملاك + لم يكمل + ريف                    -> نقل (تُحسب له سنة خدمة أرياف)
+'   ملاك + لم يكمل + حضر + غير مكلف أصلاً  -> تكليف
+'   ملاك + لم يكمل + حضر + مكلف أصلاً      -> تغيير جهة تكليف
+'
+' ملاحظة: القيمة المتوقعة لـ empType هي (ملاك) أو (عقد) فقط
+'          السطر الأخير في الدالة لا يُنفَّذ في الظروف الطبيعية
+'          وجوده للكشف الفوري عن أي خطأ إملائي في بيانات Excel
+'=============================================================
+Private Function GetTransferStatus(rural As String, empType As String, _
+                                    wsS As Worksheet, toSchName As String, _
+                                    assigned As String) As String
+
+    ' عقد: نقل دائماً بغض النظر عن أي شرط آخر
+    If empType = VAL_CONTRACT Then
+        GetTransferStatus = VAL_TRANSFERRED: Exit Function
+    End If
+
+    ' ملاك أكمل خدمة الأرياف: نقل مباشرة بلا قيود
+    If empType = VAL_PERMANENT And rural = VAL_RURAL_DONE Then
+        GetTransferStatus = VAL_TRANSFERRED: Exit Function
+    End If
+
+    ' ملاك لم يكمل الأرياف: الحالة تعتمد على بيئة المدرسة الجديدة وحالة التكليف السابقة
+    If empType = VAL_PERMANENT Then
+        Dim toSchRow As Long
+        ' افتراضي: نقل إذا لم تُوجد المدرسة في جدول المدارس (حالة نادرة للحماية)
+        GetTransferStatus = VAL_TRANSFERRED
+        If FindSchoolRow(wsS, toSchName, toSchRow) Then
+            Dim env As String: env = Trim(wsS.Cells(toSchRow, SCH_ENVIRONMENT).Value)
+            If env = VAL_URBAN Then
+                ' مدرسة حضر: نتحقق مما إذا كان المدرس مكلفاً أصلاً
+                If assigned <> "" Then
+                    GetTransferStatus = VAL_SECONDMENT_CHANGE  ' كان مكلفاً -> تغيير جهة تكليف
+                Else
+                    GetTransferStatus = VAL_SECONDMENT         ' لم يكن مكلفاً -> تكليف جديد
+                End If
+            Else
+                ' مدرسة ريف: نقل
+                GetTransferStatus = VAL_TRANSFERRED
+            End If
+        End If
+        Exit Function
+    End If
+
+    ' ===== هذا السطر لا يجب أن يُنفَّذ أبداً =====
+    ' وجوده للكشف عن أي خطأ إملائي في قيمة نوع التوظيف
+    GetTransferStatus = VAL_TRANSFERRED
+    MsgBox "تحذير: قيمة نوع التوظيف غير معروفة [" & empType & "]" & vbNewLine & _
+           "المدرسة: " & toSchName & vbNewLine & vbNewLine & _
+           "القيم المقبولة هي: " & VAL_PERMANENT & " أو " & VAL_CONTRACT, _
+           vbExclamation + MB_RIGHT + MB_RTLREADING, "خطأ في بيانات نوع التوظيف"
+
+End Function
+
+
+'=============================================================
+' [تقييم ما بعد النقل] - تحليل نتائج النقل بعد اكتمال جميع العمليات
+' الغرض: كتابة تقرير مفصل في العمود 19 يتضمن بيانات المدرستين (الأصلية والجديدة)
+'        بعد الانتهاء من كل النقلات، مع تقييم النقل:
+'        - مستحسن (تحسن)
+'        - مقبول ضمن الهامش (تدهور بسيط)
+'        - غير مرغوب [قابل للإعادة] (تدهور كبير)
+'        - محايد (حاجة متساوية)
+'        - تبادل (لا يقيَّم بنفس المعايير)
+'
+'        وإضافة النسبة المئوية للفرق بين درجات الحاجة في العمود 20.
+'
+'        ملاحظة: لا يتم إجراء أي تغيير على النقل، فقط تقييم وإعلام المستخدم
+'        ليتمكن من مراجعة النقلات غير المرغوبة يدوياً
+'=============================================================
+Private Sub EvaluatePostTransfer(wsS As Worksheet, wsR As Worksheet, lastRow As Long)
+
+    ' تعريف المتغيرات الأساسية
+    Dim i As Long                     ' عداد الصفوف في جدول الطلبات
+    Dim fromSch As String, toSch As String  ' أسماء المدارس
+    Dim statusVal As String           ' الحالة الإدارية للطلب الحالي
+    Dim subj As String, subjCol As Long        ' المادة ورقم عمودها في جدول المدارس
+    Dim fromRow As Long, toRow As Long         ' صفوف المدرستين في جدول المدارس
+    Dim fromScore As Long, toScore As Long     ' درجة الحاجة المحسوبة لكل مدرسة
+    Dim fromStaff As Long, toStaff As Long     ' عدد المدرسين لكل مادة
+    Dim fromHours As Long, toHours As Long     ' عدد الحصص لكل مادة
+    Dim fromSurplus As Long, toSurplus As Long ' الفائض (الكادر - الحاجة)
+    Dim fromVacancy As Long, toVacancy As Long ' الشاغر (الحاجة - الكادر إذا كان موجباً)
+    Dim percentage As Double                   ' النسبة المئوية للفرق بين درجات الحاجة
+
+    ' ===== مسح محتويات العمودين 19 و 20 قبل إعادة التقييم =====
+    ' (رغم أنه تم مسحها في الإجراء الرئيسي، لكن نكرر هنا للأمان)
+    For i = FIRST_ROW_REQUESTS To lastRow
+        wsR.Cells(i, COL_REQ_EVALUATION).Value = ""   ' العمود 19
+        wsR.Cells(i, COL_REQ_PERCENT).Value = ""      ' العمود 20
+    Next i
+
+    ' ===== حلقة المرور على جميع طلبات النقل المنفذة =====
+    For i = FIRST_ROW_REQUESTS To lastRow
+
+        ' قراءة المدرسة التي تم النقل إليها (العمود 14)
+        toSch = Trim(wsR.Cells(i, COL_REQ_TRANSFERRED).Value)
+        If toSch = "" Then GoTo NextEval   ' تخطى إذا لم يتم نقل هذا المدرس
+
+        ' تخطى من تم تجديد تكليفه او تثبيت تكليفه (لا يدخل في التقييم)
+        statusVal = Trim(wsR.Cells(i, COL_REQ_STATUS).Value)
+        If IsRenewalStatus(statusVal) Then GoTo NextEval
+
+        ' ===== حالة التبادل =====
+        ' إذا كان النقل بالتبادل (يوجد نص في العمود 16)، فلا يمكن تقييمه بنفس المعايير
+        ' لأن التبادل لا يغير أعداد الكادر في أي مدرسة (صفر صافي)
+        If Trim(wsR.Cells(i, COL_REQ_SWAP).Value) <> "" Then
+            wsR.Cells(i, COL_REQ_EVALUATION).Value = "تبادل - لا حاجه لتقييمه"
+            wsR.Cells(i, COL_REQ_PERCENT).Value = "---"
+            GoTo NextEval
+        End If
+
+        ' ===== تحديد المدرسة الحالية الفعلية =====
+        ' المدرس قد يكون مكلفاً في مدرسة (العمود 10)، فتلك هي المدرسة الفعلية التي كان يعمل بها قبل النقل.
+        ' إذا لم يكن مكلفاً، نأخذ المدرسة الحالية من العمود 9. (مصدر موحَّد عبر GetEffectiveSchool)
+        fromSch = GetEffectiveSchool(wsR, i)
+
+        ' قراءة المادة الدراسية
+        subj = Trim(wsR.Cells(i, COL_REQ_SUBJECT).Value)
+
+        ' البحث عن عمود المادة في جدول المدارس وعن صفوف المدرستين
+        If Not FindSubjectColumn(wsS, subj, subjCol) Then GoTo NextEval
+        If Not FindSchoolRow(wsS, fromSch, fromRow) Then GoTo NextEval
+        If Not FindSchoolRow(wsS, toSch, toRow) Then GoTo NextEval
+
+        ' ===== قراءة البيانات النهائية للمدرستين من جدول المدارس =====
+        ' المدرسة الحالية (الفعلية)
+        fromStaff = CLng(wsS.Cells(fromRow, subjCol + OFF_STAFF).Value)        ' عدد المدرسين
+        fromHours = CLng(wsS.Cells(fromRow, subjCol).Value)                    ' عدد الحصص
+        fromSurplus = CLng(wsS.Cells(fromRow, subjCol + OFF_SURPLUS).Value)    ' الفائض
+        fromVacancy = CLng(wsS.Cells(fromRow, subjCol + OFF_VACANCY).Value)    ' الشاغر
+        fromScore = GetSchoolNeedScore(wsS, fromRow, subjCol, 0)               ' درجة الحاجة
+
+        ' المدرسة الجديدة (المنقول إليها)
+        toStaff = CLng(wsS.Cells(toRow, subjCol + OFF_STAFF).Value)
+        toHours = CLng(wsS.Cells(toRow, subjCol).Value)
+        toSurplus = CLng(wsS.Cells(toRow, subjCol + OFF_SURPLUS).Value)
+        toVacancy = CLng(wsS.Cells(toRow, subjCol + OFF_VACANCY).Value)
+        toScore = GetSchoolNeedScore(wsS, toRow, subjCol, 0)
+
+        ' ===== حساب النسبة المئوية للفرق بين درجات الحاجة =====
+        ' الصيغة: (حاجة الجديدة - حاجة الأصلية) / حاجة الأصلية * 100
+        ' النسبة الموجبة تعني تحسن (الجديدة أحوج)، السالبة تعني تدهور (الأصلية أحوج)
+        If fromScore = 0 Then
+            percentage = 0
+        Else
+            percentage = (toScore - fromScore) / fromScore * 100
+        End If
+        ' كتابة النسبة في العمود 20
+        wsR.Cells(i, COL_REQ_PERCENT).Value = Format(percentage, "0.0") & "%"
+
+        ' ===== بناء النص التفصيلي للمدرسة الأصلية =====
+        Dim fromDetails As String
+        fromDetails = "المدرسة الحالية (" & fromSch & "): (" & fromHours & ") حصة, (" & fromStaff & ") مدرس" & _
+              IIf(fromStaff > 1, "ين", "") & ", فائض (" & _
+              fromSurplus & ")" & ", شاغر (" & fromVacancy & ")" & _
+              ", درجة الحاجة (" & fromScore & ")" & Chr(10)
+
+        ' ===== بناء النص التفصيلي للمدرسة الجديدة =====
+        Dim toDetails As String
+        toDetails = "المدرسة الجديدة (" & toSch & "): (" & toHours & ") حصة, (" & toStaff & ") مدرس" & _
+            IIf(toStaff > 1, "ين", "") & ", فائض (" & _
+            toSurplus & ")" & ", شاغر (" & toVacancy & ")" & _
+            ", درجة الحاجة (" & toScore & ")" & Chr(10)
+
+        ' ===== التقييم النهائي حسب درجة الحاجة والهامش =====
+        Dim rating As String
+        If fromScore < toScore Then
+            ' حالة تحسن: المدرسة الجديدة أحوج من الأصلية (وهو الهدف المثالي)
+            rating = "مستحسن (تحسن)"
+        ElseIf fromScore > toScore Then
+            ' حالة تدهور: المدرسة الحالية أحوج من الجديدة
+            Dim declinePercent As Double
+            declinePercent = (fromScore - toScore) / fromScore * 100   ' مقدار التدهور
+            If declinePercent <= EVAL_MARGIN * 100 Then
+                ' التدهور بسيط (ضمن الهامش) -> مقبول
+                rating = "مقبول ضمن الهامش (فارق " & Format(declinePercent, "0.0") & "%)"
+            Else
+                ' التدهور كبير -> غير مرغوب وقابل للإعادة يدوياً
+                rating = "غير مرغوب [قابل للإعادة] "
+            End If
+        Else
+            ' حالة تساوي الحاجة (نادرة لكنها ممكنة)
+            rating = "محايد (حاجة متساوية)"
+        End If
+
+        ' ===== كتابة التقرير النهائي في العمود 19 =====
+        ' يتكون من ثلاثة أسطر: تفاصيل الأصلية، تفاصيل الجديدة، التقييم والنسبة
+        wsR.Cells(i, COL_REQ_EVALUATION).Value = fromDetails & toDetails & vbNewLine & _
+                                      "التقييم: " & rating & " | نسبة الفرق: (" & Format(percentage, "0.0") & "%)"
+
+NextEval:
+    Next i
+
+End Sub
+
+
+'=============================================================
+' [تعبئة بيانات الحصص والكادر] - ملء الأعمدة 21-30 في جدول الطلبات
+' الغرض: تسهيل عملية التدقيق اليدوي للموظفين بعد اكتمال جميع التنقلات
+'        بحيث يتمكن المدقق من مشاهدة واقع الحصص والكادر لكل اختصاص
+'        مباشرة داخل سجل الطلب دون الحاجة للرجوع إلى ورقة المدارس.
+'
+'        بالإضافة إلى تلوين الخلايا الخاصة بالخيار الذي تم اعتماده
+'        (الأعمدة 25-26 للخيار الأول، 27-28 للثاني، 29-30 للثالث)
+'        بلون رمادي فاتح لتسهيل التدقيق البصري السريع.
+'
+'        ملاحظة: تُنفَّذ هذه الدالة تلقائياً في نهاية نظام النقل
+'        بعد اكتمال جميع مراحل المعالجة والتقييم، ولا تؤثر على قرارات النقل.
+'=============================================================
+Private Sub FillHoursAndStaffData(wsS As Worksheet, wsR As Worksheet, lastRow As Long)
+
+    ' تعريف المتغيرات الأساسية
+    Dim i           As Long          ' عداد الصفوف في جدول الطلبات
+    Dim subj        As String        ' المادة الدراسية للمتقدم
+    Dim fromSch     As String        ' المدرسة الأصلية
+    Dim assignedSch As String        ' المدرسة المكلف إليها
+    Dim choiceSch   As String        ' اسم المدرسة المطلوبة (خيار 1،2،3)
+    Dim subjCol     As Long          ' رقم عمود المادة في جدول المدارس
+    Dim c           As Long          ' عداد الخيارات (1 إلى 3)
+
+    ' حلقة المرور على جميع الصفوف في جدول الطلبات
+    For i = FIRST_ROW_REQUESTS To lastRow
+
+        ' قراءة المادة الدراسية
+        subj = Trim(wsR.Cells(i, COL_REQ_SUBJECT).Value)
+
+        ' البحث عن عمود المادة في جدول المدارس (مرة واحدة لكل صف)
+        If Not FindSubjectColumn(wsS, subj, subjCol) Then
+            ' إذا لم تُوجد المادة في جدول المدارس، نكتب رسالة في جميع الأعمدة وننتقل للصف التالي
+            WriteSubjectNotFound wsR, i
+            GoTo NextFillRow
+        End If
+
+        ' ===== المدرسة الأصلية (العمود 9) =====
+        fromSch = Trim(wsR.Cells(i, COL_REQ_ORIGINAL_SCHOOL).Value)
+        WriteSchoolHoursStaff wsS, wsR, i, fromSch, subjCol, _
+                              COL_REQ_ORIGINAL_HOURS, COL_REQ_ORIGINAL_STAFF, EMPTY_NOT_SPECIFIED
+
+        ' ===== المدرسة المكلف إليها (العمود 10) =====
+        assignedSch = Trim(wsR.Cells(i, COL_REQ_ASSIGNED_SCHOOL).Value)
+        WriteSchoolHoursStaff wsS, wsR, i, assignedSch, subjCol, _
+                              COL_REQ_ASSIGNED_HOURS, COL_REQ_ASSIGNED_STAFF, EMPTY_NO_ASSIGNMENT
+
+        ' ===== المدارس المطلوبة (الخيارات الثلاثة) =====
+        ' كل خيار يشغل عمودين متتاليين (25-26 / 27-28 / 29-30)
+        For c = 1 To 3
+            choiceSch = Trim(wsR.Cells(i, COL_REQ_CHOICE1 + c - 1).Value)
+            WriteSchoolHoursStaff wsS, wsR, i, choiceSch, subjCol, _
+                                  COL_REQ_CHOICE1_HOURS + (c - 1) * 2, _
+                                  COL_REQ_CHOICE1_STAFF + (c - 1) * 2, EMPTY_NOT_CHOSEN
+        Next c
+
+NextFillRow:
+    Next i
+
+    ' ===== تلوين الخلايا بناءً على الخيار الذي تم نقله (العمود 15) =====
+    HighlightSelectedChoices wsR, lastRow
+
+End Sub
+
+
+'=============================================================
+' تظليل الأعمدة 25-30 بلون رمادي فاتح للخيار الذي تم اعتماده
+' (اقرأ العمود 15 لتحديد رقم الخيار، ثم لوّن الخلايا المقابلة فقط)
+'=============================================================
+Private Sub HighlightSelectedChoices(wsR As Worksheet, lastRow As Long)
+    Dim i As Long
+    Dim noteText As String
+    Dim selectedOpt As Integer
+    Dim numPart As String
+
+    For i = FIRST_ROW_REQUESTS To lastRow
+        ' تحديد رقم الخيار المعتمد من نص العمود 15 (مثلاً "الخيار 2")
+        noteText = Trim(wsR.Cells(i, COL_REQ_NOTES).Value)
+        selectedOpt = 0
+        If Left(noteText, 6) = "الخيار" And Len(noteText) >= 8 Then
+            numPart = Trim(Mid(noteText, 7, 2))
+            If IsNumeric(numPart) Then
+                selectedOpt = CInt(numPart)
+            End If
+        End If
+
+        ' مسح الألوان القديمة أولاً
+        ClearChoiceColors wsR, i
+
+        ' تلوين عمودَي الخيار الذي تم النقل إليه فقط
+        Select Case selectedOpt
+            Case 1
+                wsR.Cells(i, COL_REQ_CHOICE1_HOURS).Interior.Color = HighlightGrayColor()
+                wsR.Cells(i, COL_REQ_CHOICE1_STAFF).Interior.Color = HighlightGrayColor()
+            Case 2
+                wsR.Cells(i, COL_REQ_CHOICE2_HOURS).Interior.Color = HighlightGrayColor()
+                wsR.Cells(i, COL_REQ_CHOICE2_STAFF).Interior.Color = HighlightGrayColor()
+            Case 3
+                wsR.Cells(i, COL_REQ_CHOICE3_HOURS).Interior.Color = HighlightGrayColor()
+                wsR.Cells(i, COL_REQ_CHOICE3_STAFF).Interior.Color = HighlightGrayColor()
+        End Select
+    Next i
+End Sub
+
+
+'=============================================================
+' كتابة تنبيه "مادة غير موجودة" في الأعمدة الست الخاصة بالحصص والكادر
+' عند غياب المادة من جدول المدارس - تستخدمها FillHoursAndStaffData
+'=============================================================
+Private Sub WriteSubjectNotFound(wsR As Worksheet, rowIdx As Long)
+    Dim c As Long
+    wsR.Cells(rowIdx, COL_REQ_ORIGINAL_HOURS).Value = EMPTY_SUBJECT_MISSING
+    wsR.Cells(rowIdx, COL_REQ_ORIGINAL_STAFF).Value = EMPTY_SUBJECT_MISSING
+    wsR.Cells(rowIdx, COL_REQ_ASSIGNED_HOURS).Value = EMPTY_SUBJECT_MISSING
+    wsR.Cells(rowIdx, COL_REQ_ASSIGNED_STAFF).Value = EMPTY_SUBJECT_MISSING
+    For c = 1 To 3
+        wsR.Cells(rowIdx, COL_REQ_CHOICE1_HOURS + (c - 1) * 2).Value = EMPTY_SUBJECT_MISSING
+        wsR.Cells(rowIdx, COL_REQ_CHOICE1_STAFF + (c - 1) * 2).Value = EMPTY_SUBJECT_MISSING
+    Next c
+End Sub
+
+
+'=============================================================
+' دالة مساعدة موحَّدة: كتابة حصص وكادر مدرسة في عمودين محددين
+' المدخلات:
+'   wsS, wsR    : ورقتا المدارس والطلبات
+'   rowIdx      : صف الطلب
+'   schName     : اسم المدرسة (قد يكون فارغاً)
+'   subjCol     : عمود المادة في جدول المدارس
+'   hoursCol    : عمود كتابة الحصص في جدول الطلبات
+'   staffCol    : عمود كتابة الكادر في جدول الطلبات
+'   emptyText   : النص المكتوب إذا كان اسم المدرسة فارغاً (يختلف حسب نوع المدرسة)
+'
+' السبب: هذه الكتلة كانت مكررة حرفياً للأصلية + المكلف إليها + الخيارات الثلاثة
+'        نفس منطق الكود الأصلي تماماً مع تجنّب التكرار
+'=============================================================
+Private Sub WriteSchoolHoursStaff(wsS As Worksheet, wsR As Worksheet, rowIdx As Long, _
+                                  schName As String, subjCol As Long, _
+                                  hoursCol As Long, staffCol As Long, emptyText As String)
+
+    Dim schRow   As Long
+    Dim hoursVal As Variant
+    Dim staffVal As Variant
+
+    ' حالة 1: اسم المدرسة فارغ
+    If schName = "" Then
+        wsR.Cells(rowIdx, hoursCol).Value = emptyText
+        wsR.Cells(rowIdx, staffCol).Value = emptyText
+        Exit Sub
+    End If
+
+    ' حالة 2: المدرسة غير موجودة في جدول المدارس
+    If Not FindSchoolRow(wsS, schName, schRow) Then
+        wsR.Cells(rowIdx, hoursCol).Value = EMPTY_NO_SCHOOL
+        wsR.Cells(rowIdx, staffCol).Value = EMPTY_NO_SCHOOL
+        Exit Sub
+    End If
+
+    ' حالة 3: المدرسة موجودة — اقرأ الحصص والكادر واكتبها مع الحفاظ على نوعها العددي
+    hoursVal = wsS.Cells(schRow, subjCol).Value
+    staffVal = wsS.Cells(schRow, subjCol + OFF_STAFF).Value
+
+    WriteNumericOrText wsR.Cells(rowIdx, hoursCol), hoursVal
+    WriteNumericOrText wsR.Cells(rowIdx, staffCol), staffVal
+
+End Sub
+
+'=============================================================
+' كتابة قيمة رقمية (حصص/كادر) في خلية مع الحفاظ على نوعها العددي الفعلي
+'
+' مهم جداً: يجب أن تبقى القيمة "رقماً" حقيقياً في الخلية عند صحتها
+' (وليس نصاً يمثّل رقماً)، حتى لا تنكسر أي عمليات فرز أو تجميع أو
+' تنسيق شرطي مستقبلية تعتمد على النوع العددي لهذه الأعمدة.
+' عند عدم وجود قيمة رقمية صالحة تُكتب رسالة نصية توضيحية بدلاً منها.
+'-------------------------------------------------------------
+Private Sub WriteNumericOrText(targetCell As Range, rawValue As Variant)
+    If IsNumeric(rawValue) Then
+        targetCell.Value = CLng(rawValue)           ' يبقى رقماً فعلياً في الخلية
+    Else
+        targetCell.Value = EMPTY_VALUE_NOT_NUMERIC  ' نص توضيحي عند القيمة غير الرقمية
+    End If
+End Sub
+
+'=============================================================
+' القسم الرابع: الدوال المساعدة والتحقق (Helper & Utility Functions)
+'=============================================================
+
+'-------------------------------------------------------------
+' هل قيمة الحالة المدخلة تنتمي لطائفة "تجديد/تثبيت تكليف"؟
+' تستخدم لتجاوز هذه الصفوف عند تقييم ما بعد النقل أو كتابة الحالة
+'-------------------------------------------------------------
+Private Function IsRenewalStatus(statusVal As String) As Boolean
+    IsRenewalStatus = (statusVal = VAL_STABILIZE) Or (statusVal = VAL_RENEWAL)
+End Function
+
+'-------------------------------------------------------------
+' المصدر الوحيد لتحديد "المدرسة الفعلية" للمدرس (إعادة هيكلة DRY)
+'
+' القاعدة (نفس منطق الكود الأصلي بحرفيته):
+'   إذا كان المدرس مكلَّفاً (العمود 10 ممتلئ) فهو يعمل فعلياً في مدرسة
+'   التكليف لا في الأصلية، لذا تُرجَع مدرسة التكليف.
+'   وإلا تُرجَع مدرسته الأصلية (العمود 9).
+'
+' المدخلات:
+'   wsR    : ورقة الطلبات
+'   rowIdx : صف الطلب الحالي
+' المخرجات:
+'   اسم المدرسة الفعلية (نص مُشذَّب)
+'
+' السبب: كان هذا المنطق مكرراً في النقل الجغرافي والتبادل وتقييم ما بعد النقل،
+'        وتجميعه هنا يجعل أي تعديل مستقبلي لقاعدة المدرسة الفعلية في مكان واحد.
+'-------------------------------------------------------------
+Private Function GetEffectiveSchool(wsR As Worksheet, rowIdx As Long) As String
+    Dim assignedSch As String: assignedSch = Trim(wsR.Cells(rowIdx, COL_REQ_ASSIGNED_SCHOOL).Value)
+    If assignedSch <> "" Then
+        GetEffectiveSchool = assignedSch
+    Else
+        GetEffectiveSchool = Trim(wsR.Cells(rowIdx, COL_REQ_ORIGINAL_SCHOOL).Value)
+    End If
+End Function
+
+'-------------------------------------------------------------
+' قائمة الشهادات العليا (مركزية لتجنّب تكرار تعريف المصفوفة)
+' المخرجات: مصفوفة بأسماء الشهادات العليا الممنوعة من المدارس المسائية
+'-------------------------------------------------------------
+Private Function HighDegreesList() As Variant
+    HighDegreesList = Array("دبلوم عالي", "ماجستير", "دكتوراه")
+End Function
+
+'-------------------------------------------------------------
+' مسح نتائج التشغيل السابق في جدول الطلبات (الأعمدة 14 إلى 20)
+' المدخلات: ورقة الطلبات + آخر صف بيانات
+' السبب: ضمان بدء كل تشغيل من حالة نظيفة دون بقايا من تشغيل سابق
+'-------------------------------------------------------------
+Private Sub ClearRequestResults(wsR As Worksheet, lastRow As Long)
+    Dim i As Long
+    ' الصفان 1 و2 رؤوس أعمدة، نبدأ دائماً من الصف 3
+    For i = FIRST_ROW_REQUESTS To lastRow
+        wsR.Cells(i, COL_REQ_TRANSFERRED).Value = ""   ' مسح المدرسة المنقول إليها
+        wsR.Cells(i, COL_REQ_NOTES).Value = ""         ' مسح رقم الخيار
+        wsR.Cells(i, COL_REQ_SWAP).Value = ""          ' مسح تفاصيل التبادل
+        wsR.Cells(i, COL_REQ_STATUS).Value = ""        ' مسح حالة النقل
+        wsR.Cells(i, COL_REQ_REASONS).Value = ""       ' مسح أسباب القبول أو الرفض
+        wsR.Cells(i, COL_REQ_EVALUATION).Value = ""    ' مسح تقييم ما بعد النقل
+        wsR.Cells(i, COL_REQ_PERCENT).Value = ""       ' مسح النسبة المئوية
+    Next i
+End Sub
+
+'-------------------------------------------------------------
+' تصفير حقلَي داخل/خارج في جدول المدارس لكل المواد
+' المدخلات: ورقة المدارس
+' السبب: يُنفَّذ قبل كل تشغيل لضمان أرقام نظيفة لعمودي الداخل والخارج
+'-------------------------------------------------------------
+Private Sub ClearSchoolInOutCounters(wsS As Worksheet)
+    Dim lastRowSch As Long: lastRowSch = GetLastDataRow(wsS, SCH_NAME)
+    Dim lastColSch As Long: lastColSch = GetLastDataCol(wsS, HEADER_ROW_SCHOOLS)
+    Dim rS As Long, cS As Long
+    For rS = FIRST_ROW_SCHOOLS To lastRowSch
+        For cS = SCH_SUBJECTS_START To lastColSch Step SCH_SUBJ_STEP
+            wsS.Cells(rS, cS + OFF_IN).Value = 0   ' تصفير عمود الداخل
+            wsS.Cells(rS, cS + OFF_OUT).Value = 0  ' تصفير عمود الخارج
+        Next cS
+    Next rS
+End Sub
+
+'-------------------------------------------------------------
+' آخر صف يحتوي بيانات في عمود معيّن داخل ورقة معيّنة
+' يستخدم End(xlUp) من نهاية العمود للبحث عن آخر خلية فيها قيمة
+'-------------------------------------------------------------
+Private Function GetLastDataRow(ws As Worksheet, colNum As Long) As Long
+    GetLastDataRow = ws.Cells(ws.rows.Count, colNum).End(xlUp).Row
+End Function
+
+'-------------------------------------------------------------
+' إرجاع رقم آخر عمود يحتوي على بيانات في صف رؤوس المدارس
+' يستخدم End(xlToLeft) من أقصى اليمين لتحديد آخر عمود نشط
+'-------------------------------------------------------------
+Private Function GetLastDataCol(ws As Worksheet, rowNum As Long) As Long
+    GetLastDataCol = ws.Cells(rowNum, ws.Columns.Count).End(xlToLeft).Column
+End Function
+
+'-------------------------------------------------------------
+' عدّ الطلبات التي لم يتحقق فيها نقل (العمود 14 فارغ)
+' المدخلات: ورقة الطلبات + آخر صف
+' المخرجات: عدد الصفوف الفارغة فعلياً
+'-------------------------------------------------------------
+Private Function CountFailedRequests(wsR As Worksheet, lastRow As Long) As Long
+    Dim i As Long, cnt As Long
+    For i = FIRST_ROW_REQUESTS To lastRow
+        If Trim(wsR.Cells(i, COL_REQ_TRANSFERRED).Value) = "" Then cnt = cnt + 1
+    Next i
+    CountFailedRequests = cnt
+End Function
+
+'-------------------------------------------------------------
+' عرض ملخص إحصائي نهائي للمستخدم
+' المدخلات: جميع العدادات النهائية
+' المخرجات: رسالة MsgBox بمحاذاة عربية
+'-------------------------------------------------------------
+Private Sub ShowSummary(cntGeo As Long, cntSurplus As Long, cntSwap As Long, _
+                        cntRenewal As Long, cntStabilize As Long, cntFailed As Long)
+    Dim totalDone As Long: totalDone = cntSwap + cntGeo + cntSurplus + cntRenewal + cntStabilize
+    Dim sep As String: sep = String(25, "_")
+    MsgBox "تمت معالجة جميع الطلبات بنجاح" & vbNewLine & _
+           sep & vbNewLine & _
+           "نقل العقود حسب قاعدة السكن                                  : " & cntGeo & vbNewLine & _
+           "النقل / التكليف / تغيير جهة التكليف - حسب الفائض والشاغر    : " & cntSurplus & vbNewLine & _
+           "نقل بالتبادل                 : " & cntSwap & vbNewLine & _
+           "تجديد تكليف                  : " & cntRenewal & vbNewLine & _
+           "تثبيت تكليف                  : " & cntStabilize & vbNewLine & _
+           sep & vbNewLine & _
+           "إجمالي المنقولين : " & totalDone & vbNewLine & _
+           "لم يتحقق النقل  : " & cntFailed, _
+           vbInformation + MB_RIGHT + MB_RTLREADING, "ملخص نتائج نظام النقل"
+           
+           
+    ' ===== عرض ملخص سريع في شريط الحالة =====
+    Dim period As String
+    If Hour(Now) < 12 Then
+        period = "صباحًا"
+    Else
+        period = "مساءً"
+    End If
+
+    Application.StatusBar = "برمج بواسطة إيهاب خير الله العوّاد :: وقت آخر تنفيذ: " & _
+                        Format(Now, "dd-mm-yyyy hh:nn") & " " & period
+End Sub
+
+'-------------------------------------------------------------
+' دالة مساعدة موحَّدة: هل طلب المدرس مدرسةً معيّنة ضمن خياراته الثلاثة؟
+' المدخلات:
+'   wsR        : ورقة الطلبات
+'   rowIdx     : صف المدرس
+'   targetSch  : اسم المدرسة المراد البحث عنها
+' المخرجات:
+'   رقم الخيار (1..3) إذا وُجدت المدرسة ضمن الخيارات، أو 0 إذا لم تُوجد
+'
+' السبب: فحص الرغبة بمدرسة معيّنة كان مكرراً في التبادل وتجديد التكليف،
+'        فجُمِّع في دالة واحدة تُرجِع رقم الخيار مباشرة
+'-------------------------------------------------------------
+Private Function FindChoiceNumber(wsR As Worksheet, rowIdx As Long, _
+                                  targetSch As String) As Long
+    Dim c As Long
+    For c = 1 To 3
+        If Trim(wsR.Cells(rowIdx, COL_REQ_CHOICE1 + c - 1).Value) = targetSch Then
+            FindChoiceNumber = c
+            Exit Function
+        End If
+    Next c
+    FindChoiceNumber = 0   ' لم تُطلَب هذه المدرسة
+End Function
+
+'-------------------------------------------------------------
+' دالة مساعدة موحَّدة: تحديد حالة التكليف (تثبيت / تجديد)
+' المدخلات:
+'   wsS, wsR        : ورقتا المدارس والطلبات
+'   rowIdx          : صف الطلب الحالي
+'   schRowAssigned  : صف المدرسة المكلف إليها في جدول المدارس
+' المخرجات:
+'   نص الحالة: VAL_STABILIZE (تثبيت) أو VAL_RENEWAL (تجديد)
+'
+' القاعدة (نفس منطق الكود الأصلي بحرفيته):
+'   - عقد           -> تثبيت
+'   - مدرسة ريف (غير حضر)           -> تثبيت
+'   - حضر + أكمل خدمة الأرياف (نعم) -> تثبيت
+'   - حضر + لم يكمل                 -> تجديد
+'-------------------------------------------------------------
+Private Function DetermineRenewalStatus(wsS As Worksheet, wsR As Worksheet, _
+                                        rowIdx As Long, schRowAssigned As Long) As String
+    Dim env      As String: env = Trim(wsS.Cells(schRowAssigned, SCH_ENVIRONMENT).Value)
+    Dim ruralSvc As String: ruralSvc = Trim(wsR.Cells(rowIdx, COL_REQ_RURAL_SERVICE).Value) ' خدمة الارياف
+    Dim empType  As String: empType = Trim(wsR.Cells(rowIdx, COL_REQ_EMPLOYMENT).Value)     ' نوع التوظيف
+
+    ' إذا كان المتقدم (عقد) واختار البقاء في المدرسة المكلف إليها، يُتخذ قرار تثبيت التكليف
+    If empType = VAL_CONTRACT Then
+        DetermineRenewalStatus = VAL_STABILIZE
+    Else
+    ' إذا كان المتقدم من الملاك الدائم، تُجرى التحققات اللازمة لتحديد ما إذا كان القرار هو تجديد أو تثبيت التكليف
+        If env <> VAL_URBAN Then
+            DetermineRenewalStatus = VAL_STABILIZE
+        ElseIf ruralSvc = VAL_RURAL_DONE Then
+            DetermineRenewalStatus = VAL_STABILIZE
+        Else
+            DetermineRenewalStatus = VAL_RENEWAL
+        End If
+    End If
+End Function
+
+'-------------------------------------------------------------
+' دالة مساعدة موحَّدة: فحص القيود العامة: الجنس + الشهادة العليا
+' تعيد نص فارغ إذا لا توجد قيود مانعة، أو نص أسباب الرفض إذا وُجدت
+'-------------------------------------------------------------
+Private Function CheckBasicRestrictions(teacherGender As String, qual As String, _
+                                         stuGender As String, schGender As String, _
+                                         schRank As String, schShift As String, _
+                                         highDegrees As Variant, subj As String) As String
+    Dim reasons As String
+
+    ' فحص شرط الجنس أولاً (يستقبل اسم المادة للتعامل مع التربية الرياضية)
+    reasons = CheckGenderReason(teacherGender, schGender, stuGender, schRank, subj)
+
+    ' فحص شرط الشهادة العليا مع المدارس المسائية (قرار وزاري)
+    If IsInArray(qual, highDegrees) And schShift = VAL_EVENING Then
+        reasons = AddReason(reasons, "حامل شهادة عليا لا يُنقل لمدرسة مسائية")
+    End If
+
+    CheckBasicRestrictions = reasons
+End Function
+
+'-------------------------------------------------------------
+' فحص شرط الجنس
+'
+' جدول القرار الكامل:
+'   ذكر  -> مدرسة أناث  (schGender = "اناث")     -> مرفوض دائماً
+'   أنثى -> مدرسة ذكور  (schGender = "ذكور")     -> مرفوض دائماً
+'   أنثى -> مدرسة مختلط (schGender = "مختلط")    -> مسموح بشكل عام
+'       استثناء: تربية رياضية + أنثى + مختلط    -> مرفوض
+'   أي حالة أخرى                                -> مسموح
+'
+' ملاحظة تقنية (لماذا لا يوجد شرط صريح للمتوسطات):
+'   المتوسطة ذات الكادر المختلط مسجّلة في البيانات بـ schGender = "مختلط" لا "ذكور"
+'   لذا لا تقع تحت شرط الرفض (المشروط بـ "ذكور" فقط)، ويُتحقق الاستثناء تلقائياً
+'   عبر البيانات دون حاجة لفحص رتبة المدرسة في الكود.
+'
+' ملاحظة: SCH_STUDENTS_GENDER (عمود 5) غير مُسْتخدم هنا؛ يُستعاض عنه
+'   بـ schGender (جنس الكادر) كمؤشر ضمني على جنس الطلاب في حالة المادة "التربية الرياضية"
+'-------------------------------------------------------------
+Private Function CheckGenderReason(teacherGender As String, schGender As String, _
+                                    stuGender As String, schRank As String, subj As String) As String
+    ' ذكر لا يُنقل لمدرسة بنات
+    If teacherGender = VAL_MALE And schGender = TEACHER_FEMALE_WORD Then
+        CheckGenderReason = "المدرس لا يُنقل لمدرسة بنات"
+
+    ' أنثى لا تُنقل لمدرسة كادرها ذكوري (schGender = "ذكور")
+    ' أما المدارس ذات الكادر المختلط فتقع خارج هذا الشرط وتُعالَج لاحقاً
+    ElseIf teacherGender = VAL_FEMALE And schGender = TEACHER_MALE_WORD Then
+            CheckGenderReason = "الأنثى لا تُنقل لمدرسة بنين " & schRank & _
+                                " (مسموح النقل فقط الى المتوسطات ذات الكوادر المختلطة)"
+    End If
+
+    ' ===== استثناء التربية الرياضية مع الكادر المختلط =====
+    ' المدرسة ذات الكادر المختلط (متوسطة بنين) طلابها ذكور، لذا لا يُسمح
+    ' بنقل مدرسة التربية الرياضية الأنثى إليها (قيد على جنس الطلاب لا الكادر)
+    If subj = SUBJECT_SPORT And teacherGender = VAL_FEMALE And stuGender = STUDENT_MALE_WORD Then
+        CheckGenderReason = "مدرسة التربية الرياضية الأنثى لا تُنقل لمتوسطة بنين"
+    End If
+    ' إذا لم يُعيَّن شيء: الدالة تعيد "" تلقائياً = مسموح بالنقل
+End Function
+
+'-------------------------------------------------------------
+' دالة مشتركة: تقييم حالة الفائض والشاغر بين مدرستين
+'
+' الهدف: فحص إمكانية نقل/تثبيت مدرس من مدرسة إلى أخرى
+'        بناءً على قواعد الفائض والشاغر ودرجة الحاجة.
+'
+' المعاملات:
+'   ws          : ورقة المدارس.
+'   fromRow     : صف المدرسة الأصلية.
+'   toRow       : صف المدرسة المطلوبة (أو المكلف إليها).
+'   subjCol     : عمود المادة.
+'   OneFrom     : قيمة الخصم/الإضافة عند حساب حاجة الأصلية (-1, 0, +1).
+'   OneTo       : قيمة الخصم/الإضافة عند حساب حاجة المطلوبة (-1, 0, +1).
+'   needFrom    : (إخراج) درجة حاجة الأصلية بعد الحساب.
+'   needTo      : (إخراج) درجة حاجة المطلوبة بعد الحساب.
+'
+' المخرجات:
+'   ترجع نصاً فارغاً ("") إذا كانت شروط النقل متوفرة.
+'   ترجع نص سبب الرفض إذا كانت غير متوفرة.
+'-------------------------------------------------------------
+Private Function EvaluateSurplusVacancy( _
+    ws As Worksheet, _
+    fromRow As Long, toRow As Long, _
+    subjCol As Long, _
+    OneFrom As Integer, OneTo As Integer, _
+    ByRef needFrom As Long, ByRef needTo As Long) As String
+
+    ' --- قراءة بيانات المدرستين من جدول المدارس ---
+    Dim fromSurplus As Long: fromSurplus = CLng(ws.Cells(fromRow, subjCol + OFF_SURPLUS).Value) ' فائض الأصلية
+    Dim toHours     As Long: toHours = CLng(ws.Cells(toRow, subjCol).Value)                      ' حصص المطلوبة
+    Dim toSurplus   As Long: toSurplus = CLng(ws.Cells(toRow, subjCol + OFF_SURPLUS).Value)     ' فائض المطلوبة
+    Dim toVacancy   As Long: toVacancy = CLng(ws.Cells(toRow, subjCol + OFF_VACANCY).Value)     ' شاغر المطلوبة
+
+    ' ===== شرطي رفض قطعي =====
+    ' 1: الأصلية ليس فيها فائض
+    If fromSurplus = 0 Then
+        EvaluateSurplusVacancy = "المدرسة الحالية بحاجة إلى خدماته"
+        Exit Function
+    End If
+
+    ' 2: المطلوبة لا تدرّس المادة (حصصها = صفر)
+    If toHours = 0 Then
+        EvaluateSurplusVacancy = "المدرسة المطلوبة لا تحتاج هذه المادة (عدد الحصص = صفر)"
+        Exit Function
+    End If
+
+    ' ===== قبول مبكر: فائض الأصلية كبير (>= 3) =====
+    If fromSurplus >= (1 + MIN_EQUAL_SURPLUS) Then
+        ' قبول تلقائي، لا حاجة لمتابعة الفحص
+        EvaluateSurplusVacancy = ""   ' إشارة قبول
+        Exit Function
+    End If
+
+    ' ===== رفض للحفاظ على توازن الكادر =====
+    If fromSurplus <= toSurplus And fromSurplus < MIN_EQUAL_SURPLUS Then
+        EvaluateSurplusVacancy = "لا يتم النقل من فائض أقل من حد العتبة (" & MIN_EQUAL_SURPLUS & ") إلى فائض مساوي او أكبر."
+        Exit Function
+    End If
+
+    ' ===== حالة خاصة: فائض الأصلية = 1 ولا شاغر في المطلوبة =====
+    If fromSurplus = 1 And toVacancy = 0 Then
+        ' هل المدرسة الأصلية طاردة؟
+        Dim critical As String: critical = Trim(ws.Cells(fromRow, SCH_CRITICAL).Value)
+        If critical = VAL_ITS_CRITICAL Then
+            EvaluateSurplusVacancy = "يرد الطلب كون المدرسة الاصلية حرجة/طاردة"
+            Exit Function
+        End If
+    End If
+
+    ' ===== حساب درجة الحاجة بعد النقل الافتراضي فقط =====
+    needFrom = GetSchoolNeedScore(ws, fromRow, subjCol, OneFrom)
+    needTo = GetSchoolNeedScore(ws, toRow, subjCol, OneTo)
+
+    ' الفجوة بين المدرستين بعد النقل
+    Dim diffAfter As Double: diffAfter = Abs(needFrom - needTo)
+
+    ' ===== القرار النهائي =====
+    ' الموافقة إذا كانت الفجوة صغيرة جداً، أو كانت المدرسة المطلوبة أحوج
+    If (needTo > needFrom) Or (diffAfter < MAX_NEED_DIFF) Then
+        EvaluateSurplusVacancy = ""   ' قبول
+    Else
+        ' الفجوة كبيرة والمطلوبة ليست أحوج
+        EvaluateSurplusVacancy = "النقل لا يحقق تقارباً كافياً بين المدرستين (الفجوة بعد النقل: " & Format(diffAfter, "0.0") & ") :: يجب أن تكون أقل من " & MAX_NEED_DIFF & " أو تكون المدرسة المطلوبة أعلى حاجة"
+    End If
+
+End Function
+
+'-------------------------------------------------------------
+' هل يمكن النقل بالفائض والشاغر؟
+' يعيد "" (نص فارغ) إذا النقل مسموح، أو نص سبب الرفض إذا ممنوع
+'
+' جدول القرار بالترتيب (حسب أولوية الفحص في الكود):
+'   1. فائض المدرسة الحالية = 0                           -> رفض
+'   2. حصص المادة في المدرسة المطلوبة = 0                  -> رفض
+'   3. فائض المدرسة الحالية >= ضعف حد العتبة               -> قبول (قبول مبكر، بغض النظر عن فائض المطلوبة)
+'   4. فائض الأصلية <= فائض المطلوبة وفائض الأصلية < حد العتبة -> رفض
+'   5. فائض الأصلية = 1 ولا يوجد شاغر في المطلوبة          -> فحص خاص (طاردة + حاجة)
+'   6. درجة حاجة المطلوبة <= درجة حاجة الأصلية             -> رفض
+'   7. ما تبقى من الحالات                                 -> قبول
+'-------------------------------------------------------------
+Private Function GetTransferRejectReason(ws As Worksheet, fromSch As String, _
+                                          toSch As String, subjCol As Long) As String
+    ' إيجاد صفوف المدرستين
+    Dim fromRow As Long, toRow As Long
+    If Not FindSchoolRow(ws, fromSch, fromRow) Then Exit Function
+    If Not FindSchoolRow(ws, toSch, toRow) Then Exit Function
+
+    ' متغيران لتلقي درجات الحاجة (لن نستخدمهما هنا لكن الدالة تتطلبهما)
+    Dim needFrom As Long, needTo As Long
+
+    ' استدعاء الدالة المشتركة مع القيم المطلوبة (-1, +1)
+    GetTransferRejectReason = EvaluateSurplusVacancy(ws, fromRow, toRow, subjCol, -1, 1, needFrom, needTo)
+
+End Function
+
+'-------------------------------------------------------------
+' GetSchoolNeedScore - حساب درجة حاجة المدرسة للمادة
+'
+' المبدأ الرياضي:
+'   الأساس     = loadPerTeacher × 100   (دائماً موجب)
+'   loadPerTeacher = العبء التدريسي لكل مدرس (عدد الحصص / عدد الكادر) × 100
+'   إذا شاغر: يُضاف 10000 + (شاغر × 1000) لضمان تفوقه المطلق على أي فائض
+'   التفضيلات تُضاف فوق الأساس بقيم صغيرة لا تؤثر على الترتيب الجوهري
+'   (ريف، حرجة، صباحي، رتبة، إلخ)
+'
+' المعامل One: يُستخدم لخصم مدرس واحد من الكادر عند حساب الحاجة المتوقعة
+' (مفيد في حالة الفائض=1 حيث ننقص المدرس الذي سيُنقل)
+'-------------------------------------------------------------
+Private Function GetSchoolNeedScore(ws As Worksheet, schRow As Long, subjCol As Long, Optional One As Integer = 0) As Long
+
+    ' قراءة بيانات المادة في هذه المدرسة
+    Dim vacancy  As Long: vacancy = CLng(ws.Cells(schRow, subjCol + OFF_VACANCY).Value)
+    Dim hrs      As Long: hrs = CLng(ws.Cells(schRow, subjCol).Value)
+    Dim existing As Long: existing = CLng(ws.Cells(schRow, subjCol + OFF_STAFF).Value)
+
+    '=== العبء التدريسي لكل مدرس: الأساس الرئيسي للتقييم ===
+    ' كلما ارتفع العبء كلما كانت المدرسة أحوج
+    ' مثال: 20 حصة / 2 مدرس = 10 | 20 حصة / 4 مدرسين = 5 (أقل حاجة)
+    Dim loadPerTeacher As Double
+    If (existing + One) > 0 Then
+        loadPerTeacher = hrs / (existing + One)
+    Else
+        loadPerTeacher = hrs ' لا يوجد مدرسون: كل الحصص بلا تغطية
+    End If
+
+    '=== ثوابت التفضيلات الإضافية ===
+    ' قيم صغيرة نسبياً لضمان عدم تغلبها على الأساس (العبء التدريسي)
+    Const PREF_CRITICAL     As Long = 100 ' اذا كانت المدرسة حرجة
+    Const PREF_RURAL        As Long = 25  ' بيئة المدرسة (ريف / حضر)
+    Const PREF_MIXED_SCHOOL As Long = 25  ' اذا كان جنس الكادر مختلط (متوسطة بنين فقط)
+    Const PREF_MORNING      As Long = 10  ' وقت الدوام (صباحي فقط)
+    Const PREF_SECONDARY    As Long = 10  ' رتبة المدرسة ثانوية
+    Const PREF_PREPARATORY  As Long = 5   ' رتبة المدرسة اعدادية
+
+    '=== الدرجة الأساسية: دائماً موجبة ===
+    Dim baseScore As Long
+    baseScore = CLng(loadPerTeacher * 100)
+
+    ' مكافأة الشاغر: فجوة 10000 تضمن تفوقه المطلق على أي مدرسة بلا شاغر
+    ' مثال: مدرسة بشاغر=1 و loadPerTeacher=5 -> 10000 + 1000 + 500 = 11500
+    ' مدرسة بفائض و loadPerTeacher=8  -> فقط 800 (+ تفضيلات نحو 80)
+    If vacancy > 0 Then
+        baseScore = baseScore + 10000 + (vacancy * 1000)
+    End If
+
+    '=== نقاط التفضيلات الإضافية ===
+    Dim prefScore As Long: prefScore = 0
+
+    ' قراءة خصائص المدرسة من جدول المدارس
+    Dim env       As String: env = Trim(ws.Cells(schRow, SCH_ENVIRONMENT).Value)
+    Dim critical  As String: critical = Trim(ws.Cells(schRow, SCH_CRITICAL).Value)
+    Dim shift     As String: shift = Trim(ws.Cells(schRow, SCH_SHIFT).Value)
+    Dim schGender As String: schGender = Trim(ws.Cells(schRow, SCH_STAFF_GENDER).Value)
+    Dim rank      As String: rank = Trim(ws.Cells(schRow, SCH_RANK).Value)
+
+    ' إضافة التفضيلات حسب خصائص المدرسة
+    If critical = VAL_ITS_CRITICAL Then prefScore = prefScore + PREF_CRITICAL   ' طاردة
+    If env <> VAL_URBAN Then prefScore = prefScore + PREF_RURAL                 ' ريف
+    If schGender = TEACHER_MIXED_WORD Then prefScore = prefScore + PREF_MIXED_SCHOOL    ' كادر مختلط
+    If shift <> VAL_EVENING Then prefScore = prefScore + PREF_MORNING           ' صباحي
+
+    ' تفضيل حسب الرتبة
+    Select Case rank
+        Case RANK_SECONDARY:   prefScore = prefScore + PREF_SECONDARY           ' ثانوية
+        Case RANK_PREPARATORY: prefScore = prefScore + PREF_PREPARATORY         ' اعدادية
+    End Select
+
+    GetSchoolNeedScore = baseScore + prefScore
+
+End Function
+
+'-------------------------------------------------------------
+' دالة موحَّدة لتحديث حقلَي داخل/خارج في جدول المدارس
+'
+' تُستدعى من RunSwapTransfers و SaveTransferResult (تجنباً لتكرار الكود)
+' isIncoming = True  -> داخل + 1  (مدرس دخل إلى المدرسة)
+' isIncoming = False -> خارج + 1  (مدرس خرج من المدرسة)
+'-------------------------------------------------------------
+Private Sub UpdateInOutCounters(ws As Worksheet, schRow As Long, _
+                                 subjCol As Long, isIncoming As Boolean)
+    Dim offset As Long
+    offset = IIf(isIncoming, OFF_IN, OFF_OUT)  ' تحديد عمود داخل أو خارج حسب الحالة
+    ws.Cells(schRow, subjCol + offset).Value = _
+        ws.Cells(schRow, subjCol + offset).Value + 1
+End Sub
+
+'-------------------------------------------------------------
+' إضافة سبب رفض للنص المتراكم
+' كل سبب في سطر مستقل مع مسافة بادئة "  - " لتنسيق أفضل
+'-------------------------------------------------------------
+Private Function AddReason(existing As String, newReason As String) As String
+    AddReason = IIf(existing = "", "  - " & newReason, _
+                    existing & Chr(10) & "  - " & newReason)
+End Function
+
+'-------------------------------------------------------------
+' فحص الاستثناء الجغرافي: هل المنطقتان في مجموعتين مختلفتين؟
+' مسموح: A<->B (مختلفتان) | ممنوع: A<->A أو B<->B (متماثلتان)
+' الاستخدام: للتحقق من أن المدرس يعمل بعيداً عن سكنه (الشرط الأول للنقل الجغرافي)
+'-------------------------------------------------------------
+Private Function IsGeographicException(fromArea As String, toArea As String, _
+                                        groupA As Variant, groupB As Variant) As Boolean
+    ' مسموح فقط إذا كانت إحداهما في A والأخرى في B
+    IsGeographicException = _
+        (IsInArray(fromArea, groupA) And IsInArray(toArea, groupB)) Or _
+        (IsInArray(fromArea, groupB) And IsInArray(toArea, groupA))
+End Function
+
+'-------------------------------------------------------------
+' فحص ما إذا كانت المنطقتان في نفس المجموعة الجغرافية
+' مسموح: A<->A أو B<->B (متماثلتان) | ممنوع: A<->B (مختلفتان)
+' الاستخدام: للتحقق من أن المدرسة المطلوبة قريبة من سكن المدرس (الشرط الثاني)
+'-------------------------------------------------------------
+Private Function IsSameGroup(area1 As String, area2 As String, _
+                              groupA As Variant, groupB As Variant) As Boolean
+    ' مسموح فقط إذا كانت كلتاهما في A معاً أو كلتاهما في B معاً
+    IsSameGroup = (IsInArray(area1, groupA) And IsInArray(area2, groupA)) Or _
+                  (IsInArray(area1, groupB) And IsInArray(area2, groupB))
+End Function
+
+'-------------------------------------------------------------
+' البحث عن قيمة داخل مصفوفة نصية
+' يعيد True عند الإيجاد، False إذا لم توجد
+'-------------------------------------------------------------
+Private Function IsInArray(val As String, arr As Variant) As Boolean
+    Dim i As Long
+    IsInArray = False   ' قيمة افتراضية قبل بدء البحث
+    For i = LBound(arr) To UBound(arr)
+        If arr(i) = val Then
+            IsInArray = True
+            Exit Function
+        End If
+    Next i
+End Function
+
+'-------------------------------------------------------------
+' البحث عن صف مدرسة بحسب اسمها في العمود 2 من جدول المدارس
+' يعيد True ويضع رقم الصف في schRow (ByRef) إذا وُجدت
+'-------------------------------------------------------------
+Private Function FindSchoolRow(ws As Worksheet, schName As String, _
+                                ByRef schRow As Long) As Boolean
+    Dim i As Long
+    ' البحث من الصف 4 حتى آخر صف يحتوي بيانات في العمود 2
+    For i = FIRST_ROW_SCHOOLS To GetLastDataRow(ws, SCH_NAME)
+        If Trim(ws.Cells(i, SCH_NAME).Value) = schName Then
+            schRow = i
+            FindSchoolRow = True
+            Exit Function
+        End If
+    Next i
+End Function
+
+'-------------------------------------------------------------
+' البحث عن عمود مادة دراسية في جدول المدارس
+' كل مادة تشغل SCH_SUBJ_STEP أعمدة (6 أعمدة)
+' يعيد True ويضع رقم العمود في colNum (ByRef) إذا وُجدت
+'-------------------------------------------------------------
+Private Function FindSubjectColumn(ws As Worksheet, subj As String, _
+                                    ByRef colNum As Long) As Boolean
+    Dim c       As Long
+    Dim lastCol As Long: lastCol = GetLastDataCol(ws, HEADER_ROW_SCHOOLS)
+    ' البحث في صف العناوين (HEADER_ROW_SCHOOLS) من SCH_SUBJECTS_START حتى آخر عمود
+    For c = SCH_SUBJECTS_START To lastCol Step SCH_SUBJ_STEP
+        If Trim(ws.Cells(HEADER_ROW_SCHOOLS, c).Value) = subj Then
+            colNum = c
+            FindSubjectColumn = True
+            Exit Function
+        End If
+    Next c
+End Function
+
+'-------------------------------------------------------------
+' بناء نص خلية التفاصيل (العمود 18)
+'
+' مثال على الشكل النهائي عند فشل جميع الخيارات:
+'   الخيار 1:
+'   - المدرسة الحالية بحاجة إلى خدماته
+'   الخيار 2:
+'   - المدرسة المطلوبة أقل حاجة من المدرسة الحالية ...
+'   الخيار 3: لم يُحدَّد
+'
+' مثال عند النجاح في الخيار الثاني:
+'   الخيار 1:
+'   - (سبب رفض الخيار الأول)
+'   الخيار 2: تم النقل حسب الفائض والشاغر: ...
+'   الخيار 3: لم يُحدَّد
+'
+' ملاحظة: لا يوجد تمييز بالتاقات [جغرافي]/[فائض] في النص الفعلي،
+'   أسباب المسار الأخير الذي رُفض فيه الخيار هي ما يُكتب في rejects(c)
+'-------------------------------------------------------------
+Private Function BuildResultText(rejects() As String, approvedIdx As Long, _
+                                  approvalDetails As String) As String
+    Dim result As String: result = ""
+    Dim k As Long
+
+    For k = 1 To 3
+        If approvedIdx = k Then
+            ' هذا الخيار هو الذي تم قبوله: اكتب تفاصيل القبول
+            result = result & "الخيار " & k & ": " & approvalDetails & Chr(10)
+        ElseIf rejects(k) <> "" Then
+            ' هذا الخيار مرفوض: اكتب سبب الرفض
+            result = result & "الخيار " & k & ":" & Chr(10) & rejects(k) & Chr(10)
+        Else
+            ' هذا الخيار لم يُحدَّد (خانة فارغة في الطلب)
+            result = result & "الخيار " & k & ": لم يُحدَّد" & Chr(10)
+        End If
+    Next k
+
+    BuildResultText = result
+End Function
+
+'-------------------------------------------------------------
+' لون التلوين لتظليل الخيار المعتمد في الأعمدة 25-30 (رمادي فاتح RGB(211,211,211))
+' نُعرَّف كدالة لأن خاصية Interior.Color تستقبل قيمة RGB طويلة، وثابت Private Const
+' لا يقبل استدعاء الدالة RGB() في قيمته الابتدائية. المركزية هنا تسمح بتعديل اللون
+' من مكان واحد فقط في المستقبل.
+'-------------------------------------------------------------
+Private Function HighlightGrayColor() As Long
+    HighlightGrayColor = RGB(211, 211, 211)
+End Function
+
+'-------------------------------------------------------------
+' إزالة أي تظليل سابق عن أعمدة الخيارات الثلاثة (25-30)
+' يُستدعى قبل التلوين الجديد لضمان النظافة البصرية
+'-------------------------------------------------------------
+Private Sub ClearChoiceColors(wsR As Worksheet, rowIdx As Long)
+    wsR.Cells(rowIdx, COL_REQ_CHOICE1_HOURS).Interior.ColorIndex = xlNone
+    wsR.Cells(rowIdx, COL_REQ_CHOICE1_STAFF).Interior.ColorIndex = xlNone
+    wsR.Cells(rowIdx, COL_REQ_CHOICE2_HOURS).Interior.ColorIndex = xlNone
+    wsR.Cells(rowIdx, COL_REQ_CHOICE2_STAFF).Interior.ColorIndex = xlNone
+    wsR.Cells(rowIdx, COL_REQ_CHOICE3_HOURS).Interior.ColorIndex = xlNone
+    wsR.Cells(rowIdx, COL_REQ_CHOICE3_STAFF).Interior.ColorIndex = xlNone
+End Sub
+
+'-------------------------------------------------------------
+' سطر فاصل موحَّد بين أقسام التقرير (نفس الطول في كل مكان)
+' مفصول هنا لتغيير الشكل مرة واحدة بسهولة مستقبلاً
+'-------------------------------------------------------------
+Private Function SepLine() As String
+    SepLine = String(19, "_")
+End Function
